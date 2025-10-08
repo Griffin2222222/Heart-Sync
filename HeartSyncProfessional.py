@@ -9,412 +9,525 @@ from tkinter import ttk, messagebox
 import threading
 import time
 import math
+try:
+    # Optional import; if missing user must install via requirements.txt
+    from bleak import BleakScanner, BleakClient
+except Exception:
+    BleakScanner = BleakClient = None
 import random
 import asyncio
 from collections import deque
 from datetime import datetime
 
-# Import next-generation design system
-from theme_tokens_nextgen import (
-    Typography, Colors, Spacing, Radius, Elevation, 
-    Motion, Grid, Waveform, Accessibility, Components
-)
+# --- Design Tokens (restored minimal versions) ---
+class Typography:
+    FAMILY_SYSTEM = 'Helvetica'
+    FAMILY_MONO = 'Courier'
+    FAMILY_GEOMETRIC = 'Helvetica'
+    # Slightly enlarged futuristic scale
+    SIZE_LABEL_SECONDARY = 11
+    SIZE_LABEL_PRIMARY = 13
+    SIZE_BODY = 12
+    SIZE_BODY_LARGE = 14
+    SIZE_LABEL = 12
+    SIZE_SMALL = 10
+    SIZE_CAPTION = 9
+    SIZE_H1 = 20
+    SIZE_LABEL_TERTIARY = 9
+    SIZE_DISPLAY_VITAL = 22
 
-try:
-    import bleak
-    BLUETOOTH_AVAILABLE = True
-    print("[OK] Bluetooth LE support available")
-except ImportError:
-    BLUETOOTH_AVAILABLE = False
-    print("[WARNING] bleak not installed - BLE disabled")
+class Colors:
+    SURFACE_PANEL_LIGHT = '#001111'
+    SURFACE_BASE_START = '#000000'
+    # Remove pure white for softer advanced aesthetic
+    TEXT_PRIMARY = '#d6fff5'
+    TEXT_SECONDARY = '#00cccc'
+    STATUS_CONNECTED = '#00ff88'
+    VITAL_HEART_RATE = '#00ff88'
+    VITAL_SMOOTHED = '#00ccff'
+    VITAL_WET_DRY = '#ffdd00'
+    ACCENT_PLASMA_TEAL = '#00ffaa'
+    ACCENT_TEAL_GLOW = '#00ffcc'
 
-try:
-    import matplotlib.pyplot as plt
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-    from matplotlib.figure import Figure
-    import matplotlib.animation as animation
-    MATPLOTLIB_AVAILABLE = True
-except ImportError:
-    MATPLOTLIB_AVAILABLE = False
-    print("⚠ matplotlib not installed - using simple graphs")
+class Grid:
+    COL_VITAL_VALUE = 160
+    COL_CONTROL = 180
+    PANEL_HEIGHT_VITAL = 220
+    PANEL_HEIGHT_BT = 200
+    PANEL_HEIGHT_TERMINAL = 240
+    MARGIN_WINDOW = 10
+    MARGIN_PANEL = 6
 
+class Spacing:
+    LG = 16
+    SM = 6
 
 class BluetoothManager:
-    HR_SERVICE_UUID = "0000180d-0000-1000-8000-00805f9b34fb"
-    HR_MEASUREMENT_UUID = "00002a37-0000-1000-8000-00805f9b34fb"
+    HR_SERVICE_UUID = '0000180d-0000-1000-8000-00805f9b34fb'
+    HR_MEAS_CHAR_UUID = '00002a37-0000-1000-8000-00805f9b34fb'
 
-    def __init__(self, callback):
-        self.callback = callback
-        self.client = None
+    def __init__(self, callback, tk_dispatch):
+        # Public callback for heart rate data: callback(hr, raw_hex, rr_intervals)
+        self.on_heart_rate = callback
+        # Function to marshal calls back onto Tk main thread
+        self._tk_dispatch = tk_dispatch
+        # Dynamic state
         self.available_devices = []
         self.is_connected = False
-        self.last_notification_time = 0.0
+        self.client = None
+        self.device = None  # currently connected device address (string) or None
+        # Internal flags
+        self._scan_in_progress = False
+        self._connect_in_progress = False
+        # Async loop infra
         self.loop = None
-        self.loop_thread = None
+        self._loop_thread = None
 
-    async def scan_devices(self):
-        if not BLUETOOTH_AVAILABLE:
-            print("[ERROR] Bluetooth not available - bleak not installed")
-            return []
-        self.available_devices = []
-        try:
-            print("[SCAN] Starting BLE scan (8 second timeout)...")
-            devices = await bleak.BleakScanner.discover(timeout=8.0)
-            print(f"[SCAN] Found {len(devices)} total Bluetooth devices")
-            
-            for d in devices:
-                device_name = d.name or "Unknown"
-                print(f"  - Device: {device_name} | Address: {d.address}")
-                
-                # Accept ANY device with a name (including Coospo HW700)
-                if d.name:
-                    # Check for HR-related keywords
-                    keywords = ["hr", "heart", "polar", "wahoo", "garmin", "tickr", "cardio", "apple", "watch", "coospo", "hw700", "hw"]
-                    if any(k in d.name.lower() for k in keywords):
-                        print(f"    [OK] HR device detected: {device_name}")
-                        self.available_devices.append(d)
-                    else:
-                        # Also add devices that advertise HR service
-                        print(f"    [INFO] Adding device: {device_name}")
-                        self.available_devices.append(d)
-                        
-            print(f"[SCAN] Scan complete. Found {len(self.available_devices)} potential HR devices")
-        except Exception as e:
-            print(f"[ERROR] Scan error: {e}")
-            import traceback
-            traceback.print_exc()
-        return self.available_devices
-
-    async def _connect_async(self, device):
-        """Async connect that keeps the loop alive"""
-        if not BLUETOOTH_AVAILABLE:
-            print("[ERROR] Bluetooth not available")
-            return False
-        try:
-            print(f"[CONNECT] Connecting to device: {device.name} ({device.address})...")
-            self.client = bleak.BleakClient(device.address)
-            
-            print("  [CONNECT] Establishing connection...")
-            await self.client.connect()
-            
-            if not self.client.is_connected:
-                print("  [ERROR] Failed to establish connection")
-                return False
-            
-            print("  [OK] Connection established")
-            print(f"  [NOTIFY] Starting notifications on HR characteristic: {self.HR_MEASUREMENT_UUID}")
-            
-            await self.client.start_notify(self.HR_MEASUREMENT_UUID, self._on_notify)
-            self.is_connected = True
-            
-            print("  [OK] Notifications started successfully")
-            print(f"  [WAITING] Waiting for heart rate data from {device.name}...")
-            
-            # Keep the loop alive by waiting indefinitely
-            while self.is_connected:
-                await asyncio.sleep(1)
-            
-            return True
-            
-        except Exception as e:
-            print(f"[ERROR] Connection error: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-    def connect(self, device):
-        """Start connection in a persistent thread"""
-        def run_loop():
+    # ---------------- Persistent Loop Management -----------------
+    def start(self):
+        if self.loop and self.loop.is_running():
+            return
+        import threading, asyncio
+        def _runner():
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
-            self.loop.run_until_complete(self._connect_async(device))
-            self.loop.close()
-        
-        self.loop_thread = threading.Thread(target=run_loop, daemon=True)
-        self.loop_thread.start()
-        
-        # Wait a bit for connection to establish
-        time.sleep(2)
-        return self.is_connected
+            self.loop.run_forever()
+        self._loop_thread = threading.Thread(target=_runner, daemon=True)
+        self._loop_thread.start()
+
+    def submit(self, coro, done_cb=None):
+        if not self.loop:
+            raise RuntimeError('BLE loop not started')
+        fut = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        if done_cb:
+            def _wrap(f):
+                try:
+                    res = f.result()
+                except Exception as e:
+                    res = e
+                self._tk_dispatch(lambda r=res: done_cb(r))
+            fut.add_done_callback(_wrap)
+        return fut
+
+    # ---------------- Scanning -----------------
+    async def scan_devices(self, timeout: float = 8.0):
+        if BleakScanner is None:
+            raise RuntimeError("bleak not installed; run: pip install bleak")
+        if self._scan_in_progress:
+            return self.available_devices
+        self._scan_in_progress = True
+        try:
+            all_devices = await BleakScanner.discover(timeout=timeout, return_adv=True)
+            hr_devices = []
+            for dev, adv in all_devices.values():
+                name = (dev.name or '').strip()
+                if not name or name.lower() == 'none':
+                    continue
+                svc_uuids = getattr(adv, 'service_uuids', []) or []
+                has_hr_service = any(u.lower() in ['0000180d-0000-1000-8000-00805f9b34fb', '180d'] for u in svc_uuids)
+                hr_keywords = ['hr','heart','rate','polar','garmin','wahoo','tickr','whoop','fitbit','apple watch','samsung','watch','band']
+                has_kw = any(k in name.lower() for k in hr_keywords)
+                if has_hr_service or has_kw:
+                    hr_devices.append(dev)
+            self.available_devices = hr_devices
+            return hr_devices
+        finally:
+            self._scan_in_progress = False
+
+    # ---------------- Connection & Notifications -----------------
+    async def connect(self, address: str, max_retries: int = 3):
+        if BleakClient is None:
+            raise RuntimeError("bleak not installed; run: pip install bleak")
+        if self._connect_in_progress:
+            return False
+        self._connect_in_progress = True
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                # Ensure any previous client is gone
+                if self.client:
+                    try:
+                        await self.client.disconnect()
+                    except Exception:
+                        pass
+                    self.client = None
+                # Create client
+                self.client = BleakClient(address, disconnected_callback=self._on_disconnect, timeout=20.0)
+                self._tk_dispatch(lambda a=attempt+1: print(f"[BLE] Connection attempt {a}/{max_retries}..."))
+                await self.client.connect()
+                if not self.client.is_connected:
+                    raise RuntimeError("Connection reported success but is_connected is False")
+                self.is_connected = True
+                self._tk_dispatch(lambda: print("[BLE] Connected, discovering services..."))
+                await asyncio.sleep(0.5)
+                # Service discovery
+                services = self.client.services
+                if not services:
+                    await self.client.get_services()
+                    services = self.client.services
+                # Find HR service
+                hr_service = None
+                for svc in services:
+                    if svc.uuid.lower() in [self.HR_SERVICE_UUID.lower(), '180d']:
+                        hr_service = svc
+                        break
+                if not hr_service:
+                    svc_list = [s.uuid for s in services]
+                    self._tk_dispatch(lambda svcs=svc_list: print(f"[BLE] Available services: {svcs}"))
+                    raise RuntimeError("Heart Rate service (0x180D) not found on device")
+                # Find HR measurement characteristic
+                hr_char = None
+                for c in hr_service.characteristics:
+                    if c.uuid.lower() == self.HR_MEAS_CHAR_UUID.lower():
+                        hr_char = c
+                        break
+                if not hr_char:
+                    raise RuntimeError("Heart Rate Measurement characteristic not found")
+                if 'notify' not in hr_char.properties:
+                    self._tk_dispatch(lambda props=hr_char.properties: print(f"[BLE] WARNING: HR char props: {props}"))
+                self._tk_dispatch(lambda: print("[BLE] Enabling heart rate notifications..."))
+                await self.client.start_notify(hr_char.uuid, self._hr_handler)
+                await asyncio.sleep(0.5)
+                self.device = address
+                self._tk_dispatch(lambda: print("[BLE] ✓ Connection successful, monitoring heart rate"))
+                self._connect_in_progress = False
+                return True
+            except asyncio.TimeoutError:
+                last_error = f"Connection timeout (attempt {attempt+1}/{max_retries})"
+                self._tk_dispatch(lambda e=last_error: print(f"[BLE] {e}"))
+                await asyncio.sleep(1.0)
+            except Exception as e:
+                last_error = f"{type(e).__name__}: {e}"
+                self._tk_dispatch(lambda err=last_error, a=attempt+1: print(f"[BLE] Error on attempt {a}: {err}"))
+                await asyncio.sleep(1.0)
+        # Exhausted
+        self.is_connected = False
+        self.client = None
+        self.device = None
+        self._tk_dispatch(lambda err=last_error: print(f"[BLE] ✗ Connection failed after {max_retries} attempts: {err}"))
+        self._connect_in_progress = False
+        return False
 
     async def disconnect(self):
-        if self.client and self.is_connected:
-            try:
-                print(f"[DISCONNECT] Disconnecting from device...")
-                self.is_connected = False  # Stop the keep-alive loop
-                await self.client.stop_notify(self.HR_MEASUREMENT_UUID)
-                print("  [OK] Notifications stopped")
-                await self.client.disconnect()
-                print("  [OK] Disconnected successfully")
-            except Exception as e:
-                print(f"[WARNING] Disconnect error: {e}")
+        self._tk_dispatch(lambda: print("[BLE] Disconnecting..."))
+        try:
+            if self.client and self.client.is_connected:
+                try:
+                    await self.client.stop_notify(self.HR_MEAS_CHAR_UUID)
+                    await asyncio.sleep(0.2)
+                except Exception as e:
+                    self._tk_dispatch(lambda err=str(e): print(f"[BLE] Stop notify error: {err}"))
+                try:
+                    await self.client.disconnect()
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    self._tk_dispatch(lambda err=str(e): print(f"[BLE] Disconnect error: {err}"))
+        except Exception as e:
+            self._tk_dispatch(lambda err=str(e): print(f"[BLE] Disconnect exception: {err}"))
+        finally:
             self.is_connected = False
             self.client = None
+            self.device = None
+            self._tk_dispatch(lambda: print("[BLE] ✓ Disconnected"))
 
-    def _on_notify(self, _sender, data):
-        """Called when heart rate data is received from the device"""
-        self.last_notification_time = time.time()
-        
-        if len(data) == 0:
-            print("[WARNING] Received empty data packet")
-            return
-        
+    def _on_disconnect(self, _client):
+        self.is_connected = False
+        self.client = None
+        self.device = None
+        self._tk_dispatch(lambda: print("[BLE] ⚠ Device disconnected unexpectedly"))
+
+    # ---------------- Notification Handler -----------------
+    def _hr_handler(self, _sender, data: bytearray):
         try:
-            # Log raw data
-            hex_data = data.hex().upper()
-            print(f"[PACKET] Received HR packet: {hex_data} ({len(data)} bytes)")
-            
-            # Parse heart rate
-            flags = data[0]
-            print(f"  [FLAGS] Flags: 0x{flags:02X}")
-            
-            if flags & 0x01:  # 16-bit HR
-                if len(data) >= 3:
-                    hr = int.from_bytes(data[1:3], byteorder='little')
-                    print(f"  [HR] Heart Rate: {hr} BPM (16-bit)")
-                else:
-                    print("  [WARNING] Insufficient data for 16-bit HR")
-                    return
-            else:  # 8-bit HR
-                if len(data) >= 2:
-                    hr = data[1]
-                    print(f"  [HR] Heart Rate: {hr} BPM (8-bit)")
-                else:
-                    print("  [WARNING] Insufficient data for 8-bit HR")
-                    return
-            
-            # Parse RR intervals if present
-            rr_intervals = []
-            if flags & 0x10 and len(data) > 3:
-                rr_start = 3 if flags & 0x01 else 2
-                i = rr_start
-                while i + 1 < len(data):
-                    rr_raw = int.from_bytes(data[i:i+2], byteorder='little')
-                    rr_ms = (rr_raw / 1024.0) * 1000.0
-                    rr_intervals.append(rr_ms)
-                    i += 2
-                if rr_intervals:
-                    print(f"  [RR] RR intervals: {[f'{rr:.1f}ms' for rr in rr_intervals]}")
-            
-            # Send to callback
-            if self.callback:
-                self.callback(hr, hex_data, rr_intervals)
-                print(f"  [OK] Data sent to UI callback")
-                
+            hr, rr_list, raw_hex = self._parse_hr_measurement(bytes(data))
+            if hr is not None and 30 <= hr <= 250:
+                self._tk_dispatch(lambda h=hr, hx=raw_hex, rr=rr_list: self.on_heart_rate(h, hx, rr))
+            else:
+                self._tk_dispatch(lambda v=hr: print(f"[BLE] Invalid HR value: {v}"))
         except Exception as e:
-            print(f"[ERROR] Error parsing HR data: {e}")
-            import traceback
-            traceback.print_exc()
+            self._tk_dispatch(lambda err=str(e): print(f"[BLE] HR handler error: {err}"))
 
+    @staticmethod
+    def _parse_hr_measurement(payload: bytes):
+        if not payload:
+            return None, [], ""
+        flags = payload[0]
+        is_16 = flags & 0x01
+        energy_present = bool(flags & 0x08)
+        rr_present = bool(flags & 0x10)
+        idx = 1
+        if is_16:
+            if len(payload) < idx + 2:
+                return None, [], payload.hex()
+            hr = int.from_bytes(payload[idx:idx+2], 'little')
+            idx += 2
+        else:
+            if len(payload) < idx + 1:
+                return None, [], payload.hex()
+            hr = payload[idx]
+            idx += 1
+        if energy_present and len(payload) >= idx + 2:
+            idx += 2
+        rr_intervals = []
+        if rr_present:
+            while len(payload) >= idx + 2:
+                rr_raw = int.from_bytes(payload[idx:idx+2], 'little')
+                idx += 2
+                if rr_raw:
+                    rr_intervals.append(rr_raw / 1024.0)
+        if not (0 < hr < 255):
+            return None, rr_intervals, payload.hex()
+        return hr, rr_intervals, payload.hex()
 
 class HeartSyncMonitor:
     def __init__(self, root):
         self.root = root
-        self.root.title("❖ HEARTSYNC PROFESSIONAL ❖")
-        
-        # Next-gen window configuration with deep gradient background
+        self.root.title("HeartSync Professional")
         self.root.geometry("1600x1000")
         self.root.minsize(1200, 800)
-        
-        # Apply deep gradient background (simulated with dark base)
         self.root.configure(bg=Colors.SURFACE_BASE_START)
-        
-        # Data storage - quantum-grade precision: 300 samples for detailed waveforms
+        # Data buffers
         self.hr_data = deque(maxlen=300)
         self.smoothed_hr_data = deque(maxlen=300)
         self.wet_dry_data = deque(maxlen=300)
         self.time_data = deque(maxlen=300)
         self.start_time = time.time()
-        
-        # Current values - high-precision floating point
+        # Live values
         self.current_hr = 0
         self.smoothed_hr = 0
         self.wet_dry_ratio = 0
         self.connection_status = "DISCONNECTED"
         self.signal_quality = 0
-        
-        # Processing controls
-        self.smoothing_factor = 0.1      # Minimal smoothing (most responsive)
-        self.hr_offset = 0               # -100..+100 manual BPM offset
-        self.wet_dry_offset = 0          # -100..+100 manual adjustment
-        self.wet_dry_source = 'smoothed' # 'smoothed' or 'raw'
-        
-        # Lock state for panel interaction
+        # Parameters
+        self.smoothing_factor = 0.1
+        self.hr_offset = 0
+        self.wet_dry_offset = 0
+        self.wet_dry_source = 'smoothed'
         self.is_locked = False
-
-        # Layout constants (golden ratio derived, 8pt grid aligned)
+        # Layout constants
         self.VALUE_COL_WIDTH = Grid.COL_VITAL_VALUE
         self.CONTROL_COL_WIDTH = Grid.COL_CONTROL
-        self.VALUE_LABEL_WIDTH = 5  # Fixed character width for stable sizing
-        
-        self.bt_manager = BluetoothManager(self.on_heart_rate_data)
+        self.VALUE_LABEL_WIDTH = 6
+        # BLE manager (requires bleak)
+        self.bt_manager = BluetoothManager(self.on_heart_rate_data, lambda fn: self.root.after(0, fn))
+        self.bt_manager.start()
         self._setup_ui()
-        
-        # Redirect print to console log
         self._redirect_console()
 
+    # TouchDesigner-style parameter box helper
+    def _create_param_box(self, parent, title, min_val, max_val, initial_val, *,
+                          step=1, coarse_mult=5, fine_div=10, unit="", color='#00FF88',
+                          is_float=False, callback=None, resettable=True):
+        frame = tk.Frame(parent, bg='#000000')
+        frame.pack(pady=(4,6))
+        title_lbl = tk.Label(frame, text=title, fg=color, bg='#000000',
+                             font=(Typography.FAMILY_SYSTEM, Typography.SIZE_LABEL_SECONDARY, 'bold'))
+        title_lbl.pack(pady=(0,2))
+        var = tk.StringVar()
+        def fmt(v):
+            if is_float:
+                return (f"{v:.1f}" if step < 1 else f"{v:.1f}") + unit
+            return f"{int(v)}{unit}" if v != 0 or unit else f"{int(v)}{unit}"
+        current = float(initial_val)
+        var.set(fmt(current))
+        # Centered value label with proper sizing
+        box = tk.Label(frame, textvariable=var, fg=color, bg='#111111', width=10, height=2,
+                       font=(Typography.FAMILY_MONO, Typography.SIZE_LABEL_PRIMARY, 'bold'),
+                       relief=tk.RIDGE, bd=2, cursor='sb_v_double_arrow', takefocus=1, anchor='center')
+        box.pack()
+        state = {'dragging': False,'start_y':0,'base_val':current,'value':current}
+        def clamp(v): return max(min_val, min(max_val, v))
+        def apply(v):
+            state['value'] = clamp(v)
+            var.set(fmt(state['value']))
+            if callback: callback(state['value'])
+        def apply_raw(v):
+            state['value'] = clamp(v)
+            var.set(fmt(state['value']))
+        def compute_step(event):
+            base = step
+            if event.state & 0x0001: base *= coarse_mult
+            if event.state & 0x0008: base /= fine_div
+            return base
+        def on_press(e):
+            state['dragging']=True; state['start_y']=e.y_root; state['base_val']=state['value']; box.focus_set()
+        def on_motion(e):
+            if not state['dragging']: return
+            dy = state['start_y'] - e.y_root
+            s = compute_step(e)
+            new_v = state['base_val'] + (dy/4.0)*s
+            new_v = round(new_v/step)*step if is_float else round(new_v)
+            apply(new_v)
+        def on_release(e): state['dragging']=False
+        def on_wheel(e):
+            s = compute_step(e); delta = 1 if e.delta>0 else -1
+            new_v = state['value'] + s*delta
+            new_v = round(new_v/step)*step if is_float else round(new_v)
+            apply(new_v)
+        def enter_edit():
+            entry = tk.Entry(frame, fg=color, bg='#000000', insertbackground=color,
+                             font=(Typography.FAMILY_MONO, Typography.SIZE_LABEL_PRIMARY, 'bold'), justify='center')
+            entry.insert(0, str(state['value']))
+            box.pack_forget(); entry.pack(); entry.focus_set(); entry.select_range(0, tk.END)
+            
+            # Track if we should exit on click outside
+            entry_active = {'active': True}
+            
+            def commit():
+                if not entry_active['active']: return
+                entry_active['active'] = False
+                t = entry.get().strip()
+                try:
+                    v = float(t) if is_float else int(float(t))
+                    apply(v)
+                except: pass
+                try: entry.destroy()
+                except: pass
+                box.pack()
+                
+            def cancel():
+                if not entry_active['active']: return
+                entry_active['active'] = False
+                try: entry.destroy()
+                except: pass
+                box.pack()
+            
+            # Click outside to exit
+            def on_click_outside(event):
+                # Check if click is outside the entry widget
+                if event.widget != entry:
+                    commit()
+            
+            entry.bind('<Return>', lambda _e: commit())
+            entry.bind('<Escape>', lambda _e: cancel())
+            entry.bind('<FocusOut>', lambda _e: commit())
+            # Bind click outside after a short delay to avoid immediate trigger
+            self.root.after(100, lambda: self.root.bind_all('<Button-1>', on_click_outside, add='+'))
+            
+            # Cleanup binding when entry is destroyed
+            def cleanup():
+                try: self.root.unbind_all('<Button-1>')
+                except: pass
+            entry.bind('<Destroy>', lambda _e: cleanup())
+        def on_key(e):
+            if e.keysym in ('Return','KP_Enter'): enter_edit(); return 'break'
+            if e.keysym in ('Up','Down'):
+                s = compute_step(e); delta = s if e.keysym=='Up' else -s
+                new_v = state['value'] + delta
+                new_v = round(new_v/step)*step if is_float else round(new_v)
+                apply(new_v); return 'break'
+            if resettable and e.keysym=='BackSpace': apply(0)
+        for seq, handler in [('<Button-1>',on_press),('<B1-Motion>',on_motion),('<ButtonRelease-1>',on_release),
+                              ('<MouseWheel>',on_wheel),('<Double-1>',lambda e: enter_edit()),('<Key>',on_key)]:
+            box.bind(seq, handler)
+        # Double-click title to reset to initial value
+        title_lbl.bind('<Double-1>', lambda _e: apply(initial_val) if resettable else None)
+        return {'frame':frame,'label':box,'var':var,'get':lambda:state['value'],'set':lambda v:apply_raw(v),'set_with_callback':apply}
+
     def _setup_ui(self):
-        # === NEXT-GEN LUMINOUS HEADER (taller for proper spacing) ===
-        header_frame = tk.Frame(self.root, bg=Colors.SURFACE_PANEL_LIGHT, height=80)
-        header_frame.pack(fill=tk.X, padx=0, pady=0)
-        header_frame.pack_propagate(False)
-        
-        # Left section container for title and subtitle
-        left_section = tk.Frame(header_frame, bg=Colors.SURFACE_PANEL_LIGHT)
-        left_section.pack(side=tk.LEFT, padx=Spacing.LG, pady=Spacing.SM, fill=tk.Y)
-        
-        # Main title - luminous plasma teal
-        title_label = tk.Label(left_section, text="❖ HEART SYNC SYSTEM", 
-                              font=(Typography.FAMILY_GEOMETRIC, Typography.SIZE_H1, "bold"), 
-                              fg=Colors.ACCENT_PLASMA_TEAL, bg=Colors.SURFACE_PANEL_LIGHT)
-        title_label.pack(anchor='w', pady=(4, 0))
-        
-        # Subtitle - dimmed luminous (directly below title)
-        subtitle_label = tk.Label(left_section, text="Adaptive Audio Bio Technology", 
-                                 font=(Typography.FAMILY_GEOMETRIC, Typography.SIZE_LABEL_TERTIARY), 
-                                 fg=Colors.TEXT_SECONDARY, bg=Colors.SURFACE_PANEL_LIGHT)
-        subtitle_label.pack(anchor='w', pady=(2, 0))
-        
-        # Right section container for time and status
-        right_section = tk.Frame(header_frame, bg=Colors.SURFACE_PANEL_LIGHT)
-        right_section.pack(side=tk.RIGHT, padx=Spacing.LG, pady=Spacing.SM, fill=tk.Y)
-        
-        # Time display - precise geometric mono
-        time_label = tk.Label(right_section, text="", 
-                             font=(Typography.FAMILY_MONO, Typography.SIZE_BODY_LARGE, "bold"), 
-                             fg=Colors.TEXT_PRIMARY, bg=Colors.SURFACE_PANEL_LIGHT)
-        time_label.pack(anchor='e', pady=(4, 0))
-        
-        # System status indicator - quantum dot
-        status_indicator = tk.Label(right_section, text="◆ SYSTEM OPERATIONAL", 
-                                   font=(Typography.FAMILY_GEOMETRIC, Typography.SIZE_LABEL_TERTIARY, "bold"), 
-                                   fg=Colors.STATUS_CONNECTED, bg=Colors.SURFACE_PANEL_LIGHT)
-        status_indicator.pack(anchor='e', pady=(2, 0))
-        
-        def update_time():
-            time_label.config(text=datetime.now().strftime("%Y-%m-%d  %H:%M:%S"))
-            self.root.after(1000, update_time)
-        update_time()
-        
-        # === MAIN CONTENT AREA (8pt grid, perfect symmetry) ===
-        main_frame = tk.Frame(self.root, bg=Colors.SURFACE_BASE_START)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=Grid.MARGIN_WINDOW, pady=Grid.MARGIN_PANEL)
-        
-        # Configure responsive grid
-        main_frame.grid_columnconfigure(0, weight=1)
-        main_frame.grid_rowconfigure(0, weight=1)
-        main_frame.grid_rowconfigure(1, weight=1)
-        main_frame.grid_rowconfigure(2, weight=1)
-        
-        # === VITAL SIGN PANELS (luminous readouts with photon waveforms) ===
-        # Heart Rate Panel - plasma teal accent
-        self._create_metric_panel(main_frame, "HEART RATE", "BPM", 
-                                  lambda: str(int(self.current_hr)), 
-                                  Colors.VITAL_HEART_RATE, 0, 0)
-        
-        # Smoothed HR Panel - blue-white accent
-        self._create_metric_panel(main_frame, "SMOOTHED HR", "BPM",
-                                  lambda: str(int(self.smoothed_hr)), 
-                                  Colors.VITAL_SMOOTHED, 1, 0)
-        
-        # Wet/Dry Ratio Panel - amber accent
-        self._create_metric_panel(main_frame, "WET/DRY RATIO", "",
-                                  lambda: str(int(max(1, min(100, self.wet_dry_ratio + self.wet_dry_offset)))), 
-                                  Colors.VITAL_WET_DRY, 2, 0)
-        
-        # Bottom Control Panel (glassy panels)
+        # Header
+        header = tk.Frame(self.root, bg=Colors.SURFACE_PANEL_LIGHT, height=80)
+        header.pack(fill=tk.X)
+        header.pack_propagate(False)
+        left = tk.Frame(header, bg=Colors.SURFACE_PANEL_LIGHT)
+        left.pack(side=tk.LEFT, padx=Spacing.LG, pady=Spacing.SM, fill=tk.Y)
+        tk.Label(left, text="❖ HEART SYNC SYSTEM", fg=Colors.ACCENT_PLASMA_TEAL,
+                 font=(Typography.FAMILY_GEOMETRIC, Typography.SIZE_H1, 'bold'),
+                 bg=Colors.SURFACE_PANEL_LIGHT).pack(anchor='w', pady=(4,0))
+        tk.Label(left, text="Adaptive Audio Bio Technology", fg=Colors.TEXT_SECONDARY,
+                 font=(Typography.FAMILY_GEOMETRIC, Typography.SIZE_LABEL_TERTIARY),
+                 bg=Colors.SURFACE_PANEL_LIGHT).pack(anchor='w', pady=(2,0))
+        right = tk.Frame(header, bg=Colors.SURFACE_PANEL_LIGHT)
+        right.pack(side=tk.RIGHT, padx=Spacing.LG, pady=Spacing.SM, fill=tk.Y)
+        time_lbl = tk.Label(right, text='', fg=Colors.TEXT_PRIMARY,
+                            font=(Typography.FAMILY_MONO, Typography.SIZE_BODY_LARGE, 'bold'),
+                            bg=Colors.SURFACE_PANEL_LIGHT)
+        time_lbl.pack(anchor='e', pady=(4,0))
+        tk.Label(right, text='◆ SYSTEM OPERATIONAL', fg=Colors.STATUS_CONNECTED,
+                 font=(Typography.FAMILY_GEOMETRIC, Typography.SIZE_LABEL_TERTIARY, 'bold'),
+                 bg=Colors.SURFACE_PANEL_LIGHT).pack(anchor='e', pady=(2,0))
+        def _tick():
+            time_lbl.config(text=datetime.now().strftime('%Y-%m-%d  %H:%M:%S'))
+            self.root.after(1000, _tick)
+        _tick()
+        # Main content frame
+        main = tk.Frame(self.root, bg=Colors.SURFACE_BASE_START)
+        main.pack(fill=tk.BOTH, expand=True, padx=Grid.MARGIN_WINDOW, pady=Grid.MARGIN_PANEL)
+        main.grid_columnconfigure(0, weight=1)
+        for r in range(4):
+            main.grid_rowconfigure(r, weight=1)
+        # Unified header strip
+        hdr = tk.Frame(main, bg='#000000')
+        hdr.grid(row=0, column=0, columnspan=2, sticky='ew')
+        hdr.grid_columnconfigure(0, minsize=self.VALUE_COL_WIDTH)
+        hdr.grid_columnconfigure(1, minsize=self.CONTROL_COL_WIDTH)
+        hdr.grid_columnconfigure(2, weight=1)
+        for idx, txt in enumerate(['VALUES','CONTROLS','WAVEFORM']):
+            tk.Label(hdr, text=txt, fg=Colors.TEXT_SECONDARY, bg='#000000',
+                     font=(Typography.FAMILY_SYSTEM, Typography.SIZE_BODY, 'bold')).grid(
+                        row=0, column=idx, sticky='w', padx=(14 if idx==0 else 6, 12 if idx==2 else 6), pady=(0,2))
+        # Metric panels
+        self._create_metric_panel(main, 'HEART RATE', 'BPM', lambda: str(int(self.current_hr)), Colors.VITAL_HEART_RATE, 0, 0)
+        self._create_metric_panel(main, 'SMOOTHED HR', 'BPM', lambda: str(int(self.smoothed_hr)), Colors.VITAL_SMOOTHED, 1, 0)
+        self._create_metric_panel(main, 'WET/DRY RATIO', '', lambda: str(int(max(1, min(100, self.wet_dry_ratio + self.wet_dry_offset)))), Colors.VITAL_WET_DRY, 2, 0)
+        # Control + terminal panels
         self._create_control_panel()
-        
-        # High-tech Terminal Displays
         self._create_terminal_displays()
-        
-        # Log startup message
-        self.log_to_console("❖ HeartSync Professional v2.0 - Quantum Systems Online", tag="success")
-        self.log_to_console("Awaiting Bluetooth device connection...", tag="info")
+        # Startup logs
+        self.log_to_console('❖ HeartSync Professional v2.0 - Quantum Systems Online', tag='success')
+        self.log_to_console('Awaiting Bluetooth device connection...', tag='info')
 
     def _create_metric_panel(self, parent, title, unit, value_func, color, row, col):
-        # Panel frame
-        panel = tk.Frame(parent, bg='#000000', relief=tk.FLAT, bd=0, height=200,
+        panel = tk.Frame(parent, bg='#000000', height=Grid.PANEL_HEIGHT_VITAL,
                          highlightbackground='#003333', highlightthickness=1)
-        panel.grid(row=row, column=0, columnspan=2, sticky='ew', padx=2, pady=2)
+        panel.grid(row=row+1, column=0, columnspan=2, sticky='ew', padx=2, pady=2)
         panel.grid_propagate(False)
-
-        # Grid: value col (0), control col (1), graph col (2)
         panel.grid_columnconfigure(0, minsize=self.VALUE_COL_WIDTH)
         panel.grid_columnconfigure(1, minsize=self.CONTROL_COL_WIDTH)
         panel.grid_columnconfigure(2, weight=1)
         panel.grid_rowconfigure(0, weight=1)
-
         # Value column
-        value_col = tk.Frame(panel, bg='#000000', highlightbackground=color, highlightcolor=color,
-                              highlightthickness=2, bd=0)
-        value_col.grid(row=0, column=0, sticky='nsew', padx=(12,6), pady=10)
-        
-        tk.Label(value_col, text=title, font=(Typography.FAMILY_SYSTEM, Typography.SIZE_LABEL, 'bold'), fg='#00ffff',
-                 bg='#000000', anchor='w').pack(anchor='w')
-        if unit:
-            tk.Label(value_col, text=unit, font=(Typography.FAMILY_SYSTEM, Typography.SIZE_SMALL), fg='#00ccaa',
-                     bg='#000000', anchor='w').pack(anchor='w')
-        # Inner box for numeric value
-        value_box = tk.Frame(value_col, bg='#000000', highlightbackground=color, highlightcolor=color,
-                             highlightthickness=1, bd=0, padx=4, pady=2)
-        value_box.pack(anchor='w', pady=(8,0), fill='x')
-        value_label = tk.Label(value_box, text="", font=(Typography.FAMILY_MONO, Typography.SIZE_DISPLAY_VITAL, 'bold'),
-                               fg=color, bg='#000000', anchor='w', width=self.VALUE_LABEL_WIDTH)
-        value_label.pack(anchor='w')
-
-        # Control column with enhanced visibility
-        control_col = tk.Frame(panel, bg='#000000', highlightbackground=color, highlightcolor=color,
-                               highlightthickness=2, bd=0)
-        control_col.grid(row=0, column=1, sticky='nsew', padx=6, pady=10)
-        
-        # Enhanced control header with background highlight
-        control_header_bg = tk.Frame(control_col, bg='#001a1a', bd=0)
-        control_header_bg.pack(fill='x', pady=(0,4))
-        tk.Label(control_header_bg, text="CONTROL", font=(Typography.FAMILY_SYSTEM, Typography.SIZE_BODY, 'bold'),
-                 fg='#00ffff', bg='#001a1a', pady=3).pack(anchor='w', padx=4)
-
+        value_col = tk.Frame(panel, bg='#000000', highlightbackground=color, highlightthickness=2)
+        value_col.grid(row=0, column=0, sticky='nsew', padx=(12,6), pady=12)
+        value_box = tk.Frame(value_col, bg='#000000', highlightbackground=color, highlightthickness=2, padx=4, pady=4)
+        value_box.pack(expand=True, fill='both', pady=(10,4))
+        value_label = tk.Label(value_box, text='', fg=color, bg='#000000', anchor='center',
+                               font=(Typography.FAMILY_MONO, max(Typography.SIZE_DISPLAY_VITAL, 28), 'bold'))
+        value_label.pack(expand=True, fill='both')
+        if title == 'HEART RATE':
+            # Store reference for flashing animation
+            self.hr_value_label = value_label
+        tk.Label(value_col, text=f"{title}{(' ['+unit+']') if unit else ''}", fg='#00cccc', bg='#000000',
+                 font=(Typography.FAMILY_SYSTEM, Typography.SIZE_SMALL)).pack(pady=(0,8))
+        # Control column
+        control_col = tk.Frame(panel, bg='#000000', highlightbackground=color, highlightthickness=2)
+        control_col.grid(row=0, column=1, sticky='nsew', padx=6, pady=12)
         if title == 'HEART RATE':
             self._build_hr_controls(control_col)
         elif title == 'SMOOTHED HR':
             self._build_smooth_controls(control_col)
         elif title == 'WET/DRY RATIO':
             self._build_wetdry_controls(control_col)
-
         # Graph column
-        graph_frame = tk.Frame(panel, bg='#000000', relief=tk.FLAT, bd=0)
-        graph_frame.grid(row=0, column=2, sticky='nsew', padx=8, pady=8)
-        
-        # Graph title in bright cyan (futuristic style) with refined spacing
-        graph_title = tk.Label(graph_frame, text=f"{title} WAVEFORM", 
-                              font=(Typography.FAMILY_SYSTEM, Typography.SIZE_BODY, "bold"), fg='#00ffff', bg='#000000',
-                              anchor='w')
-        graph_title.pack(anchor='w', fill='x', padx=8, pady=(5, 5))
-        
-        # Canvas for graph - SMOOTH borders with subtle glow
-        graph_canvas = tk.Canvas(graph_frame, bg='#000000', highlightthickness=1,
-                                highlightbackground='#004444')
-        graph_canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-        
-        # Store references for updates
-        setattr(self, f'{title.lower().replace(" ", "_").replace("/", "_")}_value_label', value_label)
-        setattr(self, f'{title.lower().replace(" ", "_").replace("/", "_")}_canvas', graph_canvas)
-        setattr(self, f'{title.lower().replace(" ", "_").replace("/", "_")}_data_func', 
-                lambda: self.hr_data if "HEART RATE" in title and "SMOOTHED" not in title 
-                       else self.smoothed_hr_data if "SMOOTHED" in title 
-                       else self.wet_dry_data)
-        
-        # ENHANCED: Ultra-fast update function (25ms = 40 FPS for silky smooth)
+        graph_frame = tk.Frame(panel, bg='#000000', highlightbackground=color, highlightthickness=2)
+        graph_frame.grid(row=0, column=2, sticky='nsew', padx=(6,12), pady=12)
+        tk.Frame(graph_frame, height=4, bg='#000000').pack(fill='x')
+        graph_canvas = tk.Canvas(graph_frame, bg='#000000', highlightthickness=1, highlightbackground='#004444')
+        graph_canvas.pack(expand=True, fill='both', padx=8, pady=(0,8))
+        # Store refs
+        key = title.lower().replace(' ', '_').replace('/', '_')
+        setattr(self, f'{key}_value_label', value_label)
+        setattr(self, f'{key}_canvas', graph_canvas)
+        setattr(self, f'{key}_data_func', lambda: self.hr_data if 'HEART RATE' in title and 'SMOOTHED' not in title else self.smoothed_hr_data if 'SMOOTHED' in title else self.wet_dry_data)
         def update_panel():
             value_label.config(text=value_func())
-            self._update_graph(graph_canvas, getattr(self, f'{title.lower().replace(" ", "_").replace("/", "_")}_data_func')(), color)
-            self.root.after(25, update_panel)  # 40 FPS for ultra-smooth real-time display
-        
+            self._update_graph(graph_canvas, getattr(self, f'{key}_data_func')(), color)
+            self.root.after(25, update_panel)
         self.root.after(25, update_panel)
 
     def _create_control_panel(self):
-        # Medical monitor style control panel with dark background
-        control_frame = tk.Frame(self.root, bg='#000000', height=200)
+        # Medical monitor control panel with standardized height
+        control_frame = tk.Frame(self.root, bg='#000000', height=Grid.PANEL_HEIGHT_BT)
         control_frame.pack(fill=tk.X, padx=0, pady=0)
         control_frame.pack_propagate(False)
         
@@ -432,70 +545,46 @@ class HeartSyncMonitor:
         # Initialize lock state
         self.is_locked = True
         
-        # BUTTONS IN 2x2 GRID - Avatar/Sci-Fi style with angled 3D effect
+        # ENHANCED 3D MECHANICAL BUTTONS - Next-Gen Medical Device Style
         # Row 1: SCAN and CONNECT
         row1 = tk.Frame(left_section, bg='#000000')
-        row1.pack(pady=2)
+        row1.pack(pady=4)
         
-        # SCAN DEVICES - Avatar blue with angled 3D
-        self.scan_btn = tk.Button(row1, text="SCAN", 
-                                 font=(Typography.FAMILY_SYSTEM, Typography.SIZE_CAPTION, "bold"), 
-                                 bg='#0a2540', fg='#4da6ff',
-                                 activebackground='#1a4580', activeforeground='#80ccff',
-                                 relief=tk.RAISED, bd=5, width=10, height=1,
-                                 cursor='hand2',
-                                 borderwidth=5,
-                                 highlightthickness=3,
-                                 highlightbackground='#0066cc',
-                                 highlightcolor='#0088ff',
-                                 command=self.scan_devices)
-        self.scan_btn.pack(side=tk.LEFT, padx=3)
+        # SCAN DEVICES - 3D Mechanical with lit/unlit states
+        self.scan_btn = self._create_3d_medical_button(row1, "SCAN DEVICES", 
+                                                      self.scan_devices,
+                                                      color_on='#00AAFF', color_off='#004477',
+                                                      width=12, height=2)
+        self.scan_btn.pack(side=tk.LEFT, padx=4)
         
-        # CONNECT DEVICE - Avatar gray/steel with angled 3D
-        self.connect_btn = tk.Button(row1, text="CONNECT", 
-                                    font=(Typography.FAMILY_SYSTEM, Typography.SIZE_CAPTION, "bold"), 
-                                    bg='#1a1a1a', fg='#7a7a7a',
-                                    activebackground='#3a3a3a', activeforeground='#aaaaaa',
-                                    relief=tk.RAISED, bd=5, width=10, height=1,
-                                    cursor='hand2',
-                                    borderwidth=5,
-                                    highlightthickness=3,
-                                    highlightbackground='#444444',
-                                    highlightcolor='#666666',
-                                    command=self.connect_device, state=tk.DISABLED)
-        self.connect_btn.pack(side=tk.LEFT, padx=3)
+        # CONNECT DEVICE - 3D Mechanical with lit/unlit states  
+        self.connect_btn = self._create_3d_medical_button(row1, "CONNECT", 
+                                                         self.connect_device,
+                                                         color_on='#00FF66', color_off='#004422',
+                                                         width=12, height=2, 
+                                                         initial_state=False)
+        self.connect_btn.pack(side=tk.LEFT, padx=4)
         
-        # Row 2: LOCK and DISCONNECT
+        # Row 2: LOCK and DISCONNECT  
         row2 = tk.Frame(left_section, bg='#000000')
-        row2.pack(pady=2)
+        row2.pack(pady=4)
         
-        # LOCK/UNLOCK - Avatar orange/amber with angled 3D
-        self.lock_btn = tk.Button(row2, text="LOCKED", 
-                                 font=(Typography.FAMILY_SYSTEM, Typography.SIZE_CAPTION, "bold"), 
-                                 bg='#2a1500', fg='#cc7733',
-                                 activebackground='#4a2500', activeforeground='#ff9944',
-                                 relief=tk.SUNKEN, bd=5, width=10, height=1,
-                                 cursor='hand2',
-                                 borderwidth=5,
-                                 highlightthickness=3,
-                                 highlightbackground='#885522',
-                                 highlightcolor='#aa7744',
-                                 command=self._toggle_lock)
-        self.lock_btn.pack(side=tk.LEFT, padx=3)
+        # LOCK/UNLOCK - 3D Mechanical with consistent sizing
+        self.lock_btn = self._create_3d_medical_button(row2, "LOCKED", 
+                                                      self._toggle_lock,
+                                                      color_on='#FF8800', color_off='#FF8800',
+                                                      width=12, height=2,
+                                                      initial_state=True)  # Start locked
+        self.lock_btn.pack(side=tk.LEFT, padx=4)
         
-        # DISCONNECT - Avatar red/danger with angled 3D
-        self.disconnect_btn = tk.Button(row2, text="DISCONNECT", 
-                                       font=(Typography.FAMILY_SYSTEM, Typography.SIZE_CAPTION, "bold"), 
-                                       bg='#2a0000', fg='#cc4444',
-                                       activebackground='#4a0000', activeforeground='#ff6666',
-                                       relief=tk.RAISED, bd=5, width=10, height=1,
-                                       cursor='hand2',
-                                       borderwidth=5,
-                                       highlightthickness=3,
-                                       highlightbackground='#884444',
-                                       highlightcolor='#aa5555',
-                                       command=self.disconnect_device, state=tk.DISABLED)
-        self.disconnect_btn.pack(side=tk.LEFT, padx=3)
+        # DISCONNECT - 3D Mechanical with consistent sizing (start disabled)
+        self.disconnect_btn = self._create_3d_medical_button(row2, "DISCONNECT", 
+                                                            self.disconnect_device,
+                                                            color_on='#FF4444', color_off='#FF4444',
+                                                            width=12, height=2,
+                                                            initial_state=False)
+        self.disconnect_btn['state'] = tk.DISABLED  # Start disabled until connected
+        self.disconnect_btn.pack(side=tk.LEFT, padx=4)
         
         # Right section for device info and status (below buttons visually)
         right_section = tk.Frame(bt_frame, bg='#000000')
@@ -572,12 +661,40 @@ class HeartSyncMonitor:
         firmware_label = tk.Label(right_section, text="Firmware: v2.1.3", 
                                  font=(Typography.FAMILY_SYSTEM, Typography.SIZE_SMALL), fg='#00aaaa', bg='#000000')
         firmware_label.pack(anchor='w', pady=1)
+        
+        # ==================== TERMINAL PANEL (NEW) ====================
+        # Add TERMINAL panel directly below Bluetooth connectivity
+        terminal_panel = tk.LabelFrame(control_frame, text="  TERMINAL  ", 
+                                fg='#00ff88', bg='#000a0a', 
+                                font=(Typography.FAMILY_MONO, Typography.SIZE_BODY, "bold"),
+                                relief=tk.GROOVE, bd=3, padx=10, pady=8)
+        terminal_panel.pack(fill=tk.BOTH, expand=True, padx=15, pady=(5, 10))
+        
+        # Terminal text widget - styled log display
+        self.terminal_text = tk.Text(terminal_panel, 
+                                  height=4,
+                                  bg='#000a0a', 
+                                  fg='#00ff88',
+                                  font=(Typography.FAMILY_MONO, Typography.SIZE_SMALL),
+                                  wrap=tk.WORD, 
+                                  bd=0,
+                                  highlightthickness=0,
+                                  insertbackground='#00ff88',
+                                  state=tk.DISABLED)
+        self.terminal_text.pack(fill=tk.BOTH, expand=True)
+        
+        # Add initial terminal message
+        self.terminal_text.config(state=tk.NORMAL)
+        self.terminal_text.insert(tk.END, "[TERMINAL] System ready. Awaiting commands...\n")
+        self.terminal_text.insert(tk.END, "[TERMINAL] All subsystems operational.\n")
+        self.terminal_text.config(state=tk.DISABLED)
     
     def _create_terminal_displays(self):
-        """Create high-tech terminal windows for device info and system logs"""
-        # Main terminal container
-        terminal_container = tk.Frame(self.root, bg='#000000')
-        terminal_container.pack(fill=tk.BOTH, expand=False, padx=15, pady=(5, 0))
+        """Create high-tech terminal windows with medical UI standards"""
+        # Main terminal container with standardized dimensions
+        terminal_container = tk.Frame(self.root, bg='#000000', height=Grid.PANEL_HEIGHT_TERMINAL)
+        terminal_container.pack(fill=tk.X, expand=False, padx=15, pady=(5, 0))
+        terminal_container.pack_propagate(False)
         
         # ==================== DEVICE INFO TERMINAL ====================
         device_terminal_frame = tk.LabelFrame(terminal_container, 
@@ -658,41 +775,136 @@ class HeartSyncMonitor:
         self.device_info_terminal.insert("1.0", terminal_text)
         self.device_info_terminal.config(state=tk.DISABLED)
 
+    # ==================== MEDICAL UI BUTTON STANDARDS ====================
+    def _create_medical_button(self, parent, text, command, color='#00ccaa', width=12, height=1):
+        """Create standardized medical UI button according to IEC 62366-1 standards"""
+        button = tk.Button(parent, text=text, command=command,
+                          font=(Typography.FAMILY_SYSTEM, Typography.SIZE_CAPTION, 'bold'),
+                          bg='#001a1a', fg=color, width=width, height=height,
+                          activebackground='#002a2a', activeforeground='#00ffcc',
+                          relief=tk.RAISED, bd=2, cursor='hand2',
+                          highlightthickness=2, highlightbackground=color,
+                          highlightcolor='#00ffcc')
+        return button
+
+    def _create_3d_button(self, parent, text, command, color='#00FFAA', width=12, pressed=False):
+        """Create 3D mechanical button with visual press feedback"""
+        bg_color = '#003333' if pressed else '#001818'
+        relief_style = tk.SUNKEN if pressed else tk.RAISED
+        bd_width = 1 if pressed else 3
+        
+        button = tk.Button(parent, text=text, command=command,
+                          font=(Typography.FAMILY_SYSTEM, Typography.SIZE_CAPTION, 'bold'),
+                          bg=bg_color, fg=color, width=width, height=1,
+                          activebackground='#004444', activeforeground='#00ffcc',
+                          relief=relief_style, bd=bd_width, cursor='hand2',
+                          highlightthickness=2, highlightbackground=color)
+        return button
+
+    def _create_3d_toggle_button(self, parent, text_on, text_off, command, initial_state=True):
+        """Create 3D mechanical toggle switch for input selection - ENHANCED READABILITY"""
+        self.toggle_state = initial_state
+        
+        def toggle_command():
+            self.toggle_state = not self.toggle_state
+            self._update_toggle_appearance()
+            command()
+        
+        self.toggle_btn = tk.Button(parent, command=toggle_command,
+                                   font=(Typography.FAMILY_SYSTEM, Typography.SIZE_LABEL_SECONDARY, 'bold'),  # LARGER: SIZE_TINY→SIZE_LABEL_SECONDARY
+                                   width=14, height=3, cursor='hand2',  # LARGER: width 12→14, height 2→3
+                                   highlightthickness=3)  # More prominent highlight
+        
+        self.toggle_text_on = text_on
+        self.toggle_text_off = text_off
+        self._update_toggle_appearance()
+        
+        return self.toggle_btn
+    
+    def _update_toggle_appearance(self):
+        """Update 3D toggle button appearance based on state - ENHANCED VISIBILITY"""
+        if self.toggle_state:
+            # ON state - pressed down, bright green - MORE CONTRAST
+            self.toggle_btn.config(
+                text=self.toggle_text_on,
+                bg='#004444', fg='#00FFCC',  # Enhanced contrast
+                relief=tk.SUNKEN, bd=2,  # More prominent border
+                highlightbackground='#00FFCC',
+                activebackground='#006666', activeforeground='#00ffcc'
+            )
+        else:
+            # OFF state - raised up, bright amber - MORE CONTRAST  
+            self.toggle_btn.config(
+                text=self.toggle_text_off,
+                bg='#332200', fg='#FFCC00',  # Enhanced contrast
+                relief=tk.RAISED, bd=3,
+                highlightbackground='#FFCC00',
+                activebackground='#554400', activeforeground='#ffcc00'
+            )
+
+    def _create_3d_medical_button(self, parent, text, command, color_on='#00FFAA', color_off='#004444', 
+                                 width=12, height=2, initial_state=False):
+        """Create 3D mechanical button for main medical device controls"""
+        self.button_states = getattr(self, 'button_states', {})
+        
+        def button_command():
+            # Toggle visual state when pressed
+            button_id = id(button)
+            current_state = self.button_states.get(button_id, initial_state)
+            new_state = not current_state
+            self.button_states[button_id] = new_state
+            self._update_medical_button_state(button, new_state, color_on, color_off)
+            # Execute the actual command
+            command()
+        
+        button = tk.Button(parent, text=text, command=button_command,
+                          font=(Typography.FAMILY_SYSTEM, Typography.SIZE_CAPTION, 'bold'),
+                          width=width, height=height, cursor='hand2',
+                          highlightthickness=2)
+        
+        # Store button reference and initialize state
+        button_id = id(button)
+        self.button_states[button_id] = initial_state
+        self._update_medical_button_state(button, initial_state, color_on, color_off)
+        
+        return button
+    
+    def _update_medical_button_state(self, button, is_pressed, color_on, color_off):
+        """Update 3D medical button visual state"""
+        if is_pressed:
+            # Pressed state - lit up, sunken
+            button.config(
+                bg='#002222', fg=color_on,
+                relief=tk.SUNKEN, bd=1,
+                highlightbackground=color_on
+            )
+        else:
+            # Released state - dimmed, raised
+            button.config(
+                bg='#001111', fg=color_off,
+                relief=tk.RAISED, bd=3,
+                highlightbackground=color_off
+            )
+
+    # Removed legacy precision control + dialog in favor of param boxes
     # ==================== CONTROL BUILDERS ====================
     def _build_hr_controls(self, parent):
-        # Offset slider - vertical dial style
-        hr_title = tk.Label(parent, text="HR OFFS", font=(Typography.FAMILY_SYSTEM, Typography.SIZE_SMALL, 'bold'), 
-                           fg='#00ffff', bg='#000000', cursor='hand2')
-        hr_title.pack(pady=(2,4))
-        hr_title.bind('<Button-1>', lambda e: self._reset_hr_offset_click())
-        self.hr_offset_slider = tk.Scale(parent, from_=100, to=-100, resolution=1,
-                                         orient=tk.VERTICAL, bg='#001a1a', fg='#00ff88',
-                                         troughcolor='#000000', activebackground='#00aaaa',
-                                         highlightthickness=0, bd=0, width=14, length=110,
-                                         font=(Typography.FAMILY_MONO, Typography.SIZE_TINY, 'bold'), sliderlength=14,
-                                         showvalue=0, command=self._on_hr_offset_change)
-        self.hr_offset_slider.set(0)
-        self.hr_offset_slider.pack()
-        self.hr_offset_label = tk.Label(parent, text="0", font=(Typography.FAMILY_MONO, Typography.SIZE_CAPTION, 'bold'),
-                                        fg='#00ff88', bg='#000000', width=6)
-        self.hr_offset_label.pack(pady=(4,2))
-        tk.Button(parent, text='RESET', command=lambda: self._set_hr_offset(0),
-                  font=(Typography.FAMILY_SYSTEM, Typography.SIZE_TINY, 'bold'), width=6, bg='#004444', fg='#00ff88',
-                  activebackground='#006666', bd=0).pack(pady=(2,2))
-
-    def _on_hr_offset_change(self, value):
-        try:
-            self._set_hr_offset(int(float(value)))
-        except:
-            pass
+        self.hr_control = self._create_param_box(parent,
+            title="HR OFFSET", min_val=-100, max_val=100, initial_val=0,
+            step=1, unit=" BPM", color='#00FF88', is_float=False,
+            callback=lambda v: self._set_hr_offset(int(v)))
+        self.hr_offset_label = self.hr_control['label']
+    
+    def _on_hr_offset_change_direct(self, value):
+        """Direct callback for HR offset changes"""
+        self.hr_offset = int(value)
+        self.log_to_console(f"[HR OFFSET] Set to {self.hr_offset:+d} BPM")
 
     def _set_hr_offset(self, val):
         val = max(-100, min(100, int(val)))
         self.hr_offset = val
-        if hasattr(self, 'hr_offset_slider'):
-            self.hr_offset_slider.set(val)
-        if hasattr(self, 'hr_offset_label'):
-            self.hr_offset_label.config(text=f"{val:+d}")
+        if hasattr(self, 'hr_control'):
+            self.hr_control['set'](val)
         self.log_to_console(f"[HR OFFSET] Set to {val:+d} BPM")
 
     def _reset_hr_offset_click(self):
@@ -701,115 +913,57 @@ class HeartSyncMonitor:
         self.log_to_console(f"[HR OFFSET] ✓ Reset to default (0) - clicked title")
 
     def _build_smooth_controls(self, parent):
-        smooth_title = tk.Label(parent, text="SMOOTH", font=(Typography.FAMILY_SYSTEM, Typography.SIZE_SMALL, 'bold'), 
-                               fg='#00ffff', bg='#000000', cursor='hand2')
-        smooth_title.pack(pady=(2,4))
-        smooth_title.bind('<Button-1>', lambda e: self._reset_smoothing_click())
-        self.smoothing_slider = tk.Scale(parent, from_=10.0, to=0.1, resolution=0.1,
-                                         orient=tk.VERTICAL, bg='#001a1a', fg='#00ffff',
-                                         troughcolor='#000000', activebackground='#00aaaa',
-                                         highlightthickness=0, bd=0, width=14, length=110,
-                                         font=(Typography.FAMILY_MONO, Typography.SIZE_TINY, 'bold'), sliderlength=14,
-                                         showvalue=0, command=self._on_smoothing_change)
-        self.smoothing_slider.set(self.smoothing_factor)
-        self.smoothing_slider.pack()
-        self.smoothing_value_label = tk.Label(parent, text=f"{self.smoothing_factor:.1f}x", width=6,
-                                              font=(Typography.FAMILY_MONO, Typography.SIZE_CAPTION, 'bold'), fg='#00ff88', bg='#000000')
-        self.smoothing_value_label.pack(pady=(4,2))
-        self.smoothing_metrics_label = tk.Label(parent, text="α=--\nT½=--s\n≈-- samples",
-                                                font=(Typography.FAMILY_MONO, Typography.SIZE_TINY), fg='#00ccaa', bg='#000000', justify='left')
-        self.smoothing_metrics_label.pack(pady=(2,2))
-        control_bar = tk.Frame(parent, bg='#000000')
-        control_bar.pack(pady=(2,0))
-        tk.Button(control_bar, text='-', command=lambda: self._nudge_smoothing(-0.1),
-                  font=(Typography.FAMILY_SYSTEM, Typography.SIZE_TINY, 'bold'), width=2, bg='#003333', fg='#00ffff',
-                  activebackground='#005555', bd=0).pack(side=tk.LEFT, padx=1)
-        self.smoothing_spin = tk.Spinbox(control_bar, from_=0.1, to=10.0, increment=0.1,
-                                         format="%.1f", width=4, justify='center',
-                                         command=self._spinbox_smoothing_update,
-                                         font=(Typography.FAMILY_MONO, Typography.SIZE_SMALL, 'bold'), fg='#00ff88',
-                                         bg='#001a1a', disabledbackground='#001a1a')
-        self.smoothing_spin.delete(0, tk.END); self.smoothing_spin.insert(0, f'{self.smoothing_factor:.1f}')
-        self.smoothing_spin.pack(side=tk.LEFT, padx=1)
-        tk.Button(control_bar, text='+', command=lambda: self._nudge_smoothing(0.1),
-                  font=(Typography.FAMILY_SYSTEM, Typography.SIZE_TINY, 'bold'), width=2, bg='#003333', fg='#00ffff',
-                  activebackground='#005555', bd=0).pack(side=tk.LEFT, padx=1)
-        tk.Button(parent, text='RESET', command=lambda: self._set_smoothing(0.1),
-                  font=(Typography.FAMILY_SYSTEM, Typography.SIZE_TINY, 'bold'), width=6, bg='#004444', fg='#00ff88',
-                  activebackground='#006666', bd=0).pack(pady=(4,0))
+        self.smoothing_control = self._create_param_box(parent,
+            title="SMOOTH", min_val=0.1, max_val=10.0, initial_val=self.smoothing_factor,
+            step=0.1, unit="x", color='#00CCFF', is_float=True,
+            callback=lambda v: self._set_smoothing(v, from_slider=True))
+        
+        # Enhanced medical metrics display
+        metrics_frame = tk.Frame(parent, bg='#000000')
+        metrics_frame.pack(pady=(4,0))
+        
+        self.smoothing_metrics_label = tk.Label(metrics_frame, text="α=--\nT½=--s\n≈-- samples",
+                                                font=(Typography.FAMILY_MONO, Typography.SIZE_LABEL_TERTIARY),
+                                                fg='#00BBDD', bg='#000000', justify='center')
+        self.smoothing_metrics_label.pack()
+        
         # Initialize metrics display
         self._update_smoothing_metrics()
+    
+    def _on_smoothing_change_direct(self, value):
+        """Direct callback for smoothing changes"""
+        self.smoothing_factor = float(value)
+        self._update_smoothing_metrics()
+        self.log_to_console(f"[SMOOTHING] Factor set to {self.smoothing_factor:.1f}x")
 
     def _build_wetdry_controls(self, parent):
-        # Title with click-to-reset functionality
-        wetdry_title = tk.Label(parent, text="WET/DRY", 
-                               font=(Typography.FAMILY_GEOMETRIC, Typography.SIZE_LABEL_PRIMARY, 'bold'), 
-                               fg=Colors.ACCENT_PLASMA_TEAL, bg=Colors.SURFACE_PANEL, cursor='hand2')
-        wetdry_title.pack(pady=(4,8))
-        wetdry_title.bind('<Button-1>', lambda e: self._reset_wetdry_click())
+        # Input source selector section with enhanced toggle button
+        input_frame = tk.Frame(parent, bg='#000000')
+        input_frame.pack(pady=(0,8), fill='x')
         
-        # Offset slider with next-gen styling
-        self.wetdry_offset_slider = tk.Scale(parent, from_=100, to=-100, resolution=1,
-                                             orient=tk.VERTICAL, 
-                                             bg=Colors.SURFACE_PANEL_LIGHT, 
-                                             fg=Colors.VITAL_WET_DRY,
-                                             troughcolor=Colors.SURFACE_BASE_START, 
-                                             activebackground=Colors.ACCENT_PLASMA_TEAL,
-                                             highlightthickness=0, bd=0, width=16, length=120,
-                                             font=(Typography.FAMILY_MONO, Typography.SIZE_LABEL_TERTIARY, 'bold'), 
-                                             sliderlength=16,
-                                             showvalue=0, command=self._on_wetdry_offset_change)
-        self.wetdry_offset_slider.set(0)
-        self.wetdry_offset_slider.pack(pady=Spacing.SM)
+        source_label = tk.Label(input_frame, text="INPUT SOURCE", 
+                               font=(Typography.FAMILY_SYSTEM, Typography.SIZE_LABEL_SECONDARY, 'bold'), 
+                               fg='#00FFFF', bg='#000000', justify='center')
+        source_label.pack(pady=(0,4))
         
-        # Offset value display
-        self.wetdry_offset_label = tk.Label(parent, text="0", 
-                                            font=(Typography.FAMILY_MONO, Typography.SIZE_LABEL_SECONDARY, 'bold'),
-                                            fg=Colors.VITAL_WET_DRY, bg=Colors.SURFACE_PANEL, width=6)
-        self.wetdry_offset_label.pack(pady=(4,8))
+        # Enhanced input selector switch
+        self.wetdry_source_btn = self._create_3d_toggle_button(input_frame, 
+                                                              text_on="SMOOTHED HR", 
+                                                              text_off="RAW HR",
+                                                              command=self._toggle_wetdry_source,
+                                                              initial_state=True)
+        self.wetdry_source_btn.pack(pady=(0,8))
         
-        # === 3D INPUT SOURCE SWITCH (Ultra Prominent) ===
-        # Top luminous separator
-        tk.Frame(parent, bg=Colors.VITAL_WET_DRY, height=2).pack(fill='x', pady=(Spacing.MD,0))
-        
-        # Header with plasma glow
-        source_header = tk.Label(parent, text="⚡ INPUT SOURCE", 
-                                font=(Typography.FAMILY_GEOMETRIC, Typography.SIZE_LABEL_PRIMARY, 'bold'), 
-                                fg=Colors.VITAL_WET_DRY, bg=Colors.SURFACE_PANEL)
-        source_header.pack(pady=(Spacing.SM, Spacing.XS))
-        
-        # === ULTRA VISIBLE 3D TOGGLE SWITCH ===
-        # Container frame with glow effect
-        switch_container = tk.Frame(parent, bg=Colors.SURFACE_BASE_START, 
-                                   highlightbackground=Colors.VITAL_WET_DRY,
-                                   highlightthickness=2, bd=0)
-        switch_container.pack(pady=(Spacing.XS, Spacing.SM), padx=Spacing.XS, fill='x')
-        
-        # Large, prominent 3D toggle button with perfect clarity
-        self.wetdry_source_btn = tk.Button(switch_container, 
-                                           text='● SMOOTHED HR\n(Includes Offset)',
-                                           font=(Typography.FAMILY_GEOMETRIC, Typography.SIZE_LABEL_SECONDARY, 'bold'), 
-                                           width=13, height=3,
-                                           bg=Colors.VITAL_SMOOTHED,  # Blue-white for smoothed
-                                           fg=Colors.TEXT_PRIMARY, 
-                                           bd=4,
-                                           relief=tk.RAISED,  # 3D raised effect
-                                           cursor='hand2',
-                                           highlightthickness=3,
-                                           highlightbackground=Colors.ACCENT_TEAL_GLOW,
-                                           activebackground=Colors.ACCENT_TEAL_GLOW,
-                                           command=self._toggle_wetdry_source)
-        self.wetdry_source_btn.pack(padx=Spacing.SM, pady=Spacing.SM, fill='both', expand=True)
-        
-        # Bottom luminous separator
-        tk.Frame(parent, bg=Colors.VITAL_WET_DRY, height=2).pack(fill='x', pady=(Spacing.SM, Spacing.MD))
-        
-        # Reset button with next-gen styling
-        tk.Button(parent, text='RESET OFFSET', command=lambda: self._set_wetdry_offset(0),
-                  font=(Typography.FAMILY_GEOMETRIC, Typography.SIZE_LABEL_TERTIARY, 'bold'), 
-                  width=12, height=1,
-                  bg=Colors.SURFACE_PANEL_LIGHT, fg=Colors.VITAL_WET_DRY,
-                  activebackground=Colors.SURFACE_OVERLAY, bd=2, relief=tk.RIDGE).pack(pady=(0, Spacing.SM))
+        self.wetdry_control = self._create_param_box(parent,
+            title="WET/DRY", min_val=-100, max_val=100, initial_val=0,
+            step=1, unit="%", color='#FFDD00', is_float=False,
+            callback=lambda v: self._set_wetdry_offset(int(v)))
+        self.wetdry_offset_label = self.wetdry_control['label']
+    
+    def _on_wetdry_offset_change_direct(self, value):
+        """Direct callback for wet/dry offset changes"""
+        self.wet_dry_offset = int(value)
+        self.log_to_console(f"[WET/DRY OFFSET] Set to {self.wet_dry_offset:+d}%")
 
     def _toggle_wetdry_source(self):
         """Toggle between smoothed HR and raw HR input for wet/dry calculation"""
@@ -865,10 +1019,12 @@ class HeartSyncMonitor:
     def _set_wetdry_offset(self, val):
         val = max(-100, min(100, int(val)))
         self.wet_dry_offset = val
-        if hasattr(self, 'wetdry_offset_slider'):
-            self.wetdry_offset_slider.set(val)
-        if hasattr(self, 'wetdry_offset_label'):
-            self.wetdry_offset_label.config(text=f"{val:+d}")
+        # Update new param box control (silent set; UI handles formatting via unit)
+        if hasattr(self, 'wetdry_control'):
+            try:
+                self.wetdry_control['set'](val)
+            except Exception:
+                pass  # Fail-safe; prevents drag callback cascades
         self.log_to_console(f"[WET/DRY OFFSET] Set to {val:+d}")
 
     def _reset_wetdry_click(self):
@@ -890,26 +1046,16 @@ class HeartSyncMonitor:
         self.is_locked = not self.is_locked
         
         if self.is_locked:
-            # LOCKED state - SUNKEN button (pressed in), dimmed Avatar orange
-            self.lock_btn.config(
-                text="LOCKED",
-                bg='#2a1500',
-                fg='#cc7733',
-                relief=tk.SUNKEN,
-                activebackground='#4a2500',
-                highlightbackground='#885522'
-            )
+            # LOCKED state - button stays pressed, orange
+            self.lock_btn['text'] = "LOCKED"
+            self._update_button_state(self.lock_btn, True)  # Keep pressed down
             self.log_to_console("[LOCK] System LOCKED")
         else:
-            # UNLOCKED state - RAISED button (popped out), bright Avatar green
-            self.lock_btn.config(
-                text="UNLOCKED",
-                bg='#00331a',
-                fg='#44ee88',
-                relief=tk.RAISED,
-                activebackground='#00552a',
-                highlightbackground='#44aa66'
-            )
+            # UNLOCKED state - button release, green
+            self.lock_btn['text'] = "UNLOCKED"
+            self.lock_btn['bg'] = '#00884a'  # Change to green
+            self.lock_btn['activebackground'] = '#00aa5a'
+            self._update_button_state(self.lock_btn, False)  # Release button
             self.log_to_console("[LOCK] System UNLOCKED")
 
     def _update_button_state(self, button, is_active):
@@ -965,13 +1111,12 @@ class HeartSyncMonitor:
         # Clamp and store
         factor = max(0.1, min(10.0, round(float(factor), 1)))
         self.smoothing_factor = factor
-        # Sync UI elements
-        if not from_slider and hasattr(self, 'smoothing_slider'):
-            self.smoothing_slider.set(factor)
-        if not from_spin and hasattr(self, 'smoothing_spin'):
-            self.smoothing_spin.delete(0, tk.END); self.smoothing_spin.insert(0, f"{factor:.1f}")
-        if hasattr(self, 'smoothing_value_label'):
-            self.smoothing_value_label.config(text=f"{factor:.1f}x")
+        # Update new param box control only (silent set; UI formats via unit)
+        if hasattr(self, 'smoothing_control'):
+            try:
+                self.smoothing_control['set'](factor)
+            except Exception:
+                pass
         # Update metrics display
         self._update_smoothing_metrics()
         self.log_to_console(f"[SMOOTHING] Factor set to {factor:.1f}x")
@@ -1038,211 +1183,198 @@ class HeartSyncMonitor:
         sys.stderr = ConsoleRedirector(self.console_log, sys.stderr)
 
     def _update_graph(self, canvas, data, color):
-        """Futuristic high-precision graph rendering with sleek styling"""
-        canvas.delete("all")
-        
+        """Medical monitor style: fixed-speed strip, consistent grid; remove verbose seconds labels."""
+        canvas.delete('all')
         if len(data) < 2:
             return
-            
-        width = canvas.winfo_width()
-        height = canvas.winfo_height()
-        
-        if width <= 1 or height <= 1:
+        w = canvas.winfo_width(); h = canvas.winfo_height()
+        if w <= 1 or h <= 1:
             return
-        
-        # Optimized margins for sleek appearance
-        left_margin = 55
-        right_margin = 25
-        top_margin = 25
-        bottom_margin = 35
-        
-        graph_width = width - left_margin - right_margin
-        graph_height = height - top_margin - bottom_margin
-        
-        # Get data range with refined padding
+        # Layout constants tuned for monitor style
+        LM, RM, TM, BM = 48, 18, 14, 18
+        gw = w - LM - RM; gh = h - TM - BM
         data_list = list(data)
-        min_val = min(data_list)
-        max_val = max(data_list)
-        
-        # Smart padding calculation
-        range_padding = (max_val - min_val) * 0.08
-        if range_padding < 1:
-            range_padding = 5
-        min_val -= range_padding
-        max_val += range_padding
-        
-        if max_val == min_val:
-            max_val = min_val + 10
-        
-        # Draw sleek background with subtle border
-        canvas.create_rectangle(left_margin, top_margin, 
-                               left_margin + graph_width, top_margin + graph_height,
-                               fill='#000000', outline='#004444', width=1)
-        
-        # Draw REFINED grid (futuristic precision)
-        # Vertical grid lines (time axis) - subtle but precise
-        num_v_lines = 20
-        for i in range(num_v_lines + 1):
-            x = left_margin + (i * graph_width / num_v_lines)
-            # Alternating line intensity for depth
-            line_color = '#2a2a2a' if i % 5 != 0 else '#004444'
-            canvas.create_line(x, top_margin, x, top_margin + graph_height, 
-                             fill=line_color, width=1)
-        
-        # Horizontal grid lines (value axis) - clean spacing
-        num_h_lines = 10
-        for i in range(num_h_lines + 1):
-            y = top_margin + (i * graph_height / num_h_lines)
-            value = max_val - (i * (max_val - min_val) / num_h_lines)
-            
-            # Refined grid line with depth
-            line_color = '#2a2a2a' if i % 2 != 0 else '#004444'
-            canvas.create_line(left_margin, y, left_margin + graph_width, y,
-                             fill=line_color, width=1)
-            
-            # Y-axis value labels (crisp cyan text)
-            canvas.create_text(left_margin - 8, y, text=f"{value:.0f}",
-                             anchor='e', fill='#00cccc', font=(Typography.FAMILY_MONO, Typography.SIZE_SMALL, 'bold'))
-        
-        # X-axis time labels (refined spacing)
-        num_time_labels = 6
-        time_span = len(data_list) / 10.0  # Assuming 10 samples/second
-        for i in range(num_time_labels + 1):
-            x = left_margin + (i * graph_width / num_time_labels)
-            time_val = (i * time_span / num_time_labels)
-            canvas.create_text(x, top_margin + graph_height + 18, 
-                             text=f"{time_val:.1f}s",
-                             anchor='n', fill='#00cccc', font=(Typography.FAMILY_MONO, Typography.SIZE_SMALL, 'bold'))
-        
-        # Draw ULTRA-SMOOTH waveform with enhanced anti-aliasing
-        if len(data_list) >= 2:
-            points = []
-            for i, value in enumerate(data_list):
-                # Precise coordinate mapping
-                x = left_margin + (i / (len(data_list) - 1)) * graph_width
-                y = top_margin + graph_height - ((value - min_val) / (max_val - min_val)) * graph_height
-                points.append(x)
-                points.append(y)
-            
-            if len(points) >= 4:
-                # SLEEK FLOWING LINE - Double-layer for smooth glow effect
-                # Shadow/glow layer for depth and smoothness
-                canvas.create_line(points, fill=color, width=3, smooth=True, 
-                                 splinesteps=20, state='normal')  # Ultra-high smoothing
-                
-                # Main waveform line (crisp, bright, flowing)
-                canvas.create_line(points, fill=color, width=2, smooth=True, 
-                                 splinesteps=20)
-                
-                # NO DATA POINTS - Pure sleek flowing line only
-        
-        # Draw sleek axes labels
-        # Y-axis label (vertical text)
-        canvas.create_text(12, top_margin + graph_height/2, text="BPM",
-                         anchor='center', fill='#00aaaa', font=(Typography.FAMILY_SYSTEM, Typography.SIZE_SMALL, 'bold'),
-                         angle=90)
-        
-        # X-axis label
-        canvas.create_text(left_margin + graph_width/2, height - 8, text="TIME (SECONDS)",
-                         anchor='s', fill='#00aaaa', font=(Typography.FAMILY_SYSTEM, Typography.SIZE_SMALL, 'bold'))
-        
-        # Draw refined min/max indicators with better positioning
-        canvas.create_text(width - right_margin, top_margin + 8, 
-                         text=f"PEAK {max(data_list):.1f}",
-                         anchor='ne', fill='#00ff88', font=(Typography.FAMILY_MONO, Typography.SIZE_SMALL, 'bold'))
-        canvas.create_text(width - right_margin, top_margin + graph_height - 8,
-                         text=f"MIN {min(data_list):.1f}",
-                         anchor='se', fill='#ff6666', font=(Typography.FAMILY_MONO, Typography.SIZE_SMALL, 'bold'))
+        # Y scale padding
+        dmin = min(data_list); dmax = max(data_list)
+        rng = max(1.0, dmax - dmin)
+        pad = max(4.0, rng * 0.12)
+        dmin -= pad; dmax += pad
+        if dmax <= dmin: dmax = dmin + 5
+        # Determine vertical major step targeting ~6 bands using 1/2/5 rule
+        target = 6
+        raw_step = (dmax - dmin) / target
+        mag = 10 ** int(math.floor(math.log10(raw_step))) if raw_step>0 else 1
+        norm = raw_step / mag
+        if norm < 1.5: vs = 1
+        elif norm < 3.5: vs = 2
+        elif norm < 7.5: vs = 5
+        else: vs = 10
+        y_step = vs * mag
+        y_start = math.floor(dmin / y_step) * y_step
+        # Background panel
+        canvas.create_rectangle(LM, TM, LM+gw, TM+gh, fill='#000000', outline='#003333', width=1)
+        # Grid colors
+        major_c = '#003f3f'
+        minor_c = '#001e1e'
+        # Horizontal grid (major + 4 minor subdivisions)
+        minor_sub = 5
+        y_val = y_start
+        while y_val <= dmax + 1e-6:
+            y = TM + (1 - (y_val - dmin) / (dmax - dmin)) * gh
+            canvas.create_line(LM, y, LM+gw, y, fill=major_c, width=1)
+            # Label at left
+            canvas.create_text(LM - 6, y, text=f"{y_val:.0f}", anchor='e',
+                               fill='#00b3b3', font=(Typography.FAMILY_MONO, Typography.SIZE_SMALL))
+            nxt = y_val + y_step
+            for m in range(1, minor_sub):
+                mv = y_val + m * (y_step / minor_sub)
+                if mv >= dmax: break
+                my = TM + (1 - (mv - dmin) / (dmax - dmin)) * gh
+                canvas.create_line(LM, my, LM+gw, my, fill=minor_c, width=1)
+            y_val += y_step
+        # Time grid: treat last N samples as fixed window strip
+        sample_rate = 10.0  # Hz
+        total_secs = (len(data_list)-1) / sample_rate
+        # Choose fixed major = 1s, minor = 0.2s (like ECG 0.2s large, 0.04s small, adapted to 10Hz)
+        major_sec = 1.0
+        minor_sec = 0.2
+        # number of pixels per second
+        px_per_sec = gw / total_secs if total_secs>0 else gw
+        # Draw vertical lines from right to left so they feel stationary as strip scrolls
+        # Align newest sample at right edge
+        for s in range(int(total_secs//major_sec)+2):
+            x = LM + gw - s * px_per_sec * major_sec
+            if x < LM: break
+            canvas.create_line(x, TM, x, TM+gh, fill=major_c, width=1)
+            # Minor lines between majors
+            for m in range(1, int(major_sec/minor_sec)):
+                xm = x - m * px_per_sec * minor_sec
+                if xm < LM: break
+                canvas.create_line(xm, TM, xm, TM+gh, fill=minor_c, width=1)
+        # Waveform path (scrolling strip: newest on right)
+        pts = []
+        scale_y = gh / (dmax - dmin)
+        n = len(data_list)
+        for i, v in enumerate(data_list):
+            # Map so index n-1 -> right edge
+            frac = i / (n - 1)
+            x = LM + frac * gw
+            y = TM + gh - (v - dmin) * scale_y
+            pts.extend([x, y])
+        if len(pts) >= 4:
+            canvas.create_line(pts, fill=color, width=2, smooth=True, splinesteps=12)
+        # Left Y axis label
+        canvas.create_text(LM - 28, TM + gh/2, text='BPM', angle=90, anchor='center',
+                           fill='#007777', font=(Typography.FAMILY_SYSTEM, Typography.SIZE_SMALL))
+        # Window info (top right)
+        canvas.create_text(LM + gw - 4, TM + 6, text=f"LAST {total_secs:.0f}s", anchor='ne',
+                           fill='#00cccc', font=(Typography.FAMILY_MONO, Typography.SIZE_SMALL))
+        # Peak / Min inside frame
+        peak = max(data_list); low = min(data_list)
+        canvas.create_text(LM + gw - 4, TM + 18, text=f"PEAK {peak:.0f}", anchor='ne',
+                           fill='#00ff88', font=(Typography.FAMILY_MONO, Typography.SIZE_SMALL))
+        canvas.create_text(LM + gw - 4, TM + gh - 4, text=f"MIN {low:.0f}", anchor='se',
+                           fill='#ff6666', font=(Typography.FAMILY_MONO, Typography.SIZE_SMALL))
 
     def scan_devices(self):
+        """Initiate BLE heart rate device scan (async via BluetoothManager loop)."""
+        # Prevent concurrent scans
+        if getattr(self.bt_manager, '_scan_in_progress', False):
+            self.log_to_console("Scan already in progress...", tag='warning')
+            return
         self.status_label.config(text="SCANNING...", fg='yellow')
-        self._update_button_state(self.scan_btn, True)  # Press button down
+        self._update_button_state(self.scan_btn, True)
         self.scan_btn.config(state=tk.DISABLED)
-        self.log_to_console("Scanning for BLE devices...", tag="info")
-        
-        def scan_thread():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            devices = loop.run_until_complete(self.bt_manager.scan_devices())
-            loop.close()
-            
-            self.root.after(0, lambda: self._on_scan_complete(devices))
-        
-        threading.Thread(target=scan_thread, daemon=True).start()
+        self.log_to_console("Scanning for heart rate devices (10 seconds)...", tag="info")
+        # Submit async scan coroutine to persistent BLE loop
+        self.bt_manager.submit(self.bt_manager.scan_devices(), lambda devices: self._on_scan_complete(devices))
 
     def _on_scan_complete(self, devices):
         self.scan_btn.config(state=tk.NORMAL)
         self._update_button_state(self.scan_btn, False)  # Release button
         
         if devices:
-            device_names = [f"{d.name} ({d.address})" for d in devices]
+            # Format device names nicely: prioritize name over address
+            device_names = []
+            for d in devices:
+                name = d.name if d.name and d.name.lower() != 'none' else 'Unknown Device'
+                # Shorten long MAC addresses for cleaner display
+                addr_short = d.address[-8:] if len(d.address) > 8 else d.address
+                device_names.append(f"{name} ({addr_short})")
+            
             self.device_combo['values'] = device_names
             self.device_combo.current(0)
             self.connect_btn.config(state=tk.NORMAL)
             self._update_button_state(self.connect_btn, False)  # Ready to use
-            self.status_label.config(text=f"FOUND {len(devices)} DEVICE(S)", fg='#00ff00')
-            self.log_to_console(f"✓ Found {len(devices)} device(s)", tag="success")
+            self.status_label.config(text=f"FOUND {len(devices)} HR DEVICE(S)", fg='#00ff00')
+            self.log_to_console(f"✓ Found {len(devices)} heart rate device(s)", tag="success")
             for d in devices:
-                self.log_to_console(f"  • {d.name} ({d.address})", tag="data")
+                name = d.name if d.name and d.name.lower() != 'none' else 'Unknown'
+                self.log_to_console(f"  • {name} ({d.address})", tag="data")
         else:
-            self.status_label.config(text="NO DEVICES FOUND", fg='red')
-            self.log_to_console("No BLE devices found", tag="warning")
+            self.status_label.config(text="NO HR DEVICES FOUND", fg='red')
+            self.log_to_console("No heart rate devices found. Try pairing your watch in System Settings first.", tag="warning")
 
     def connect_device(self):
         if not self.device_combo.get():
             return
-            
         selected_idx = self.device_combo.current()
+        if selected_idx < 0 or selected_idx >= len(self.bt_manager.available_devices):
+            self.log_to_console("Invalid device selection", tag='error')
+            return
         device = self.bt_manager.available_devices[selected_idx]
-        
         self.status_label.config(text="CONNECTING...", fg='yellow')
         self.connect_btn.config(state=tk.DISABLED)
-        self._update_button_state(self.connect_btn, True)  # Press button down
-        self.log_to_console(f"Connecting to {device.name}...", tag="info")
-        
-        # Connect (starts its own persistent thread)
-        success = self.bt_manager.connect(device)
-        
-        # Check connection after longer delay to allow full connection establishment
-        self.root.after(4000, lambda: self._on_connect_complete(self.bt_manager.is_connected, device.name))
+        self._update_button_state(self.connect_btn, True)
+        device_name = device.name if getattr(device, 'name', None) else 'Unknown Device'
+        self.log_to_console(f"Connecting to {device_name} ({getattr(device,'address','?')})...", tag='info')
+        self.bt_manager.submit(self.bt_manager.connect(device.address), lambda success: self._on_connect_complete(success, device_name))
 
     def _on_connect_complete(self, success, device_name):
+        """Handle connection result and update UI accordingly."""
         if success:
             # Connection successful - update button states
-            self.status_label.config(text="", fg='#00ff88')
+            self.status_label.config(text="CONNECTED", fg='#00ff88')
             self.status_indicator.config(fg='#00ff88')
             self.connected_label.config(text="◉ CONNECTED")
-            self.disconnect_btn.config(state=tk.NORMAL)
+            self.disconnect_btn['state'] = tk.NORMAL  # Enable disconnect button
             self._update_button_state(self.disconnect_btn, False)  # Ready to disconnect
             self._update_button_state(self.connect_btn, False)  # Release connect button
+            self.connect_btn.config(state=tk.DISABLED)  # Disable connect while connected
             self.device_detail.config(text=f"Device: {device_name}", fg='#00ff88')
             self.packet_label.config(fg='#00ff88')
             self.quality_dots.config(fg='#00ff88')
             
             # Update device terminal with connection info
-            device_address = self.bt_manager.device.address if self.bt_manager.device else "Unknown"
-            self._update_device_terminal("CONNECTED", device_name, device_address, "N/A", "---")
+            try:
+                device_address = self.bt_manager.client.address if self.bt_manager.client else "Unknown"
+            except:
+                device_address = "Unknown"
+            self._update_device_terminal("CONNECTED", device_name, device_address, "Active", "---")
             self.log_to_console(f"✓ Connected to {device_name}", tag="success")
+            self.log_to_console("Waiting for heart rate data...", tag="info")
         else:
+            # Connection failed - reset UI
             self.status_label.config(text="CONNECTION FAILED", fg='#ff5555')
             self.status_indicator.config(fg='#444444')
-            self.connect_btn.config(state=tk.NORMAL)
+            self.connect_btn['state'] = tk.NORMAL
             self._update_button_state(self.connect_btn, False)  # Release button
-            self.log_to_console("✗ Connection failed", tag="error")
+            self.log_to_console("✗ Connection failed - check console for details", tag="error")
+            self.log_to_console("Tips: Ensure device is nearby, paired in System Settings, and not connected to other apps", tag="info")
 
     def disconnect_device(self):
+        """Disconnect from BLE device in async thread."""
         self._update_button_state(self.disconnect_btn, True)  # Press button down
+        self.log_to_console("Disconnecting from device...", tag="info")
         
-        # Disconnect from the device
-        if self.bt_manager.loop and self.bt_manager.is_connected:
-            # Schedule disconnect in the BLE loop
-            asyncio.run_coroutine_threadsafe(
-                self.bt_manager.disconnect(), 
-                self.bt_manager.loop
-            )
-            self.root.after(1000, self._on_disconnect_complete)
-        else:
-            self._on_disconnect_complete()
+        def disconnect_thread():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self.bt_manager.disconnect())
+            loop.close()
+            self.root.after(0, self._on_disconnect_complete)
+        
+        threading.Thread(target=disconnect_thread, daemon=True).start()
     
     def _on_disconnect_complete(self):
         """Handle UI updates after disconnection"""
@@ -1250,9 +1382,9 @@ class HeartSyncMonitor:
         self.status_label.config(text="DISCONNECTED", fg='#666666')
         self.status_indicator.config(fg='#444444')
         self.connected_label.config(text="")
-        self.disconnect_btn.config(state=tk.DISABLED)
+        self.disconnect_btn['state'] = tk.DISABLED  # Disable disconnect button
         self._update_button_state(self.disconnect_btn, False)  # Release button
-        self.connect_btn.config(state=tk.NORMAL)
+        self.connect_btn['state'] = tk.NORMAL
         self._update_button_state(self.connect_btn, False)  # Ready to connect again
         self.device_detail.config(text="Device: Awaiting Scan...", fg='#00ccaa')
         self.packet_label.config(fg='#666666')
@@ -1272,7 +1404,7 @@ class HeartSyncMonitor:
             self.status_label.config(text="", fg='#00ff88')
             self.status_indicator.config(fg='#00ff88')
             self.connected_label.config(text="◉ CONNECTED")
-            self.disconnect_btn.config(state=tk.NORMAL)
+            self.disconnect_btn['state'] = tk.NORMAL  # Enable disconnect button
             self.packet_label.config(fg='#00ff88')
             self.quality_dots.config(fg='#00ff88')
         
@@ -1338,16 +1470,67 @@ class HeartSyncMonitor:
             packets_expected = int(current_time) + 1
             quality_pct = min(99, int((packets_received / max(1, packets_expected)) * 100))
             self.packet_label.config(text=f"{packets_received}/{packets_expected} ({quality_pct}%)")
+            # Resync subtle heart rate flash
+            self._schedule_hr_flash()
             
             # Update device terminal with current BPM if connected
             if self.bt_manager.is_connected and self.bt_manager.device:
-                device_name = self.bt_manager.device.name or "Unknown"
-                device_address = self.bt_manager.device.address
+                # self.bt_manager.device now stores the address (string). Try to map back to scanned device for name.
+                addr = self.bt_manager.device
+                # Attempt to find matching device object from last scan for a friendly name.
+                match = None
+                for d in getattr(self.bt_manager, 'available_devices', []):
+                    if getattr(d, 'address', None) == addr:
+                        match = d
+                        break
+                device_name = (getattr(match, 'name', None) or 'Unknown').strip() if match else 'Unknown'
+                device_address = addr
                 self._update_device_terminal("CONNECTED", device_name, device_address, "N/A", f"{int(self.current_hr)}")
 
             print(f"  [OK] UI updated successfully - HR: {hr}, Smoothed: {self.smoothed_hr:.1f}, Wet/Dry: {self.wet_dry_ratio:.1f} SRC={self.wet_dry_source} OFFSET={self.wet_dry_offset:+d}")
         else:
             print(f"  [WARNING] Invalid HR value: {hr} - outside medical range (30-220 BPM)")
+
+    # --- BOLD HR PULSE FLASH - Synced to Real Heart Rate -------------------------------------------------
+    def _schedule_hr_flash(self):
+        """Schedule next heartbeat flash precisely synced to BPM."""
+        if not hasattr(self, 'hr_value_label'):
+            return
+        bpm = self.current_hr
+        if bpm <= 0 or bpm > 250:
+            return
+        # Cancel pending pulse if any
+        if hasattr(self, '_hr_flash_job') and self._hr_flash_job:
+            try: self.root.after_cancel(self._hr_flash_job)
+            except: pass
+        # Calculate precise interval: 60000ms per minute / BPM = ms per beat
+        interval = int(60000 / max(1, bpm))
+        interval = max(240, min(2000, interval))  # Safety clamp (250 BPM max, 30 BPM min)
+        self._hr_flash_job = self.root.after(interval, self._hr_flash_pulse)
+
+    def _hr_flash_pulse(self):
+        """Execute a bold, clearly visible pulse flash that user can feel matches their heartbeat."""
+        if not hasattr(self, 'hr_value_label'):
+            return
+
+        # Flash sequence
+        lbl = self.hr_value_label
+        base_fg = getattr(self, '_hr_base_fg', '#00ff88')
+        self._hr_base_fg = base_fg
+
+        # Phase 1 flash (peak)
+        flash_peak = '#00ffe0'
+        lbl.config(fg=flash_peak, font=(Typography.FAMILY_MONO, 32, 'bold'))
+
+        # Phase 2 (quick decay)
+        flash_bright = '#35ffd9'
+        self.root.after(60, lambda: lbl.config(fg=flash_bright, font=(Typography.FAMILY_MONO, 30, 'bold')))
+
+        # Phase 3 (return to baseline)
+        self.root.after(170, lambda: lbl.config(fg=base_fg, font=(Typography.FAMILY_MONO, max(Typography.SIZE_DISPLAY_VITAL, 28), 'bold')))
+
+        # Reschedule next beat
+        self._schedule_hr_flash()
 
 
 def main():

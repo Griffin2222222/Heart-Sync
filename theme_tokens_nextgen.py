@@ -253,15 +253,15 @@ class Grid:
     
     BASE_UNIT = GRID_BASE
     
-    # === COLUMN WIDTHS (Golden ratio derived) ===
-    COL_VITAL_VALUE = 200        # Vital sign value column
-    COL_CONTROL = 160            # Control column
+    # === COLUMN WIDTHS (Medical UI Standards - Equal sizing) ===
+    COL_VITAL_VALUE = 240        # Vital sign value column (standardized)
+    COL_CONTROL = 240            # Control column (matching value column)
     COL_WAVEFORM_MIN = 600       # Minimum waveform width
     
-    # === PANEL DIMENSIONS ===
-    PANEL_HEIGHT_VITAL = 200     # Standard vital panel height
+    # === PANEL DIMENSIONS (Medical UI Standards) ===
+    PANEL_HEIGHT_VITAL = 220     # Standard vital panel height (increased for uniformity)
     PANEL_HEIGHT_BT = 240        # Bluetooth panel height
-    PANEL_HEIGHT_TERMINAL = 160  # Terminal display height
+    PANEL_HEIGHT_TERMINAL = 180  # Terminal display height (increased)
     
     # === MARGINS (Symmetrical) ===
     MARGIN_WINDOW = 16           # Window edge margin
