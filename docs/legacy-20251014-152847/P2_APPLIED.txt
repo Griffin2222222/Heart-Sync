@@ -1,0 +1,301 @@
+=== PATCH 2/6: UDS Transport + Auto-Launch + Heartbeat ===
+# Complete client rewrite: TCP→UDS, length-prefixed framing, exponential backoff
+
+*** STATUS: APPLIED & VERIFIED ***
+
+Changes Summary:
+1. HeartSyncBLEClient.h - Updated API with UDS, DeviceInfo{id,rssi,name}, thread-safe snapshot
+2. HeartSyncBLEClient.cpp - Complete rewrite (TCP→UDS, 459 lines)
+3. PluginProcessor.cpp - Updated callbacks to new API (onHrData, onPermissionChanged)
+4. PluginEditor.cpp - Updated scan logic to use startScan(bool) and getDevicesSnapshot()
+
+*** Key Features Implemented ***
+✓ UDS socket connection to ~/Library/Application Support/HeartSync/bridge.sock
+✓ Length-prefixed messages: 4-byte big-endian length + JSON payload
+✓ 64KB max message size enforced (drops connection on violation)
+✓ Exponential backoff: 100→200→400→800→1600→5000ms (capped) + ±10% jitter
+✓ Auto-launch Bridge after 2 failed attempts via open --background
+✓ Heartbeat watchdog: tracks bridge_heartbeat events, 5s timeout → reconnect
+✓ Thread-safe device cache with getDevicesSnapshot() copy-on-read
+✓ All callbacks via MessageManager::callAsync (UI thread safe)
+✓ Exception-safe socket operations
+
+*** BEGIN UNIFIED DIFF ***
+(Note: Full 459-line .cpp file was rewritten, showing key header changes only)
+
+diff --git a/HeartSync/Source/Core/HeartSyncBLEClient.h b/HeartSync/Source/Core/HeartSyncBLEClient.h
+index old..new 100644
+--- a/HeartSync/Source/Core/HeartSyncBLEClient.h
++++ b/HeartSync/Source/Core/HeartSyncBLEClient.h
+@@ -5,20 +5,22 @@
+ #include <vector>
++#include <atomic>
+ 
+ /**
+- * @brief TCP client for communicating with HeartSync BLE Helper app
++ * @brief UDS client for communicating with HeartSync Bridge
+  * 
+- * Connects to localhost:51721 and exchanges JSON messages.
+- * No CoreBluetooth dependencies - all BLE handled by external helper process.
++ * Connects to ~/Library/Application Support/HeartSync/bridge.sock
++ * Uses length-prefixed JSON messages (4-byte big-endian + payload)
++ * No CoreBluetooth dependencies - all BLE handled by external Bridge process
+  */
+ class HeartSyncBLEClient : private juce::Thread
+ {
+ public:
+-    /** Device info from helper */
++    /** Device info from Bridge */
+     struct DeviceInfo
+     {
+         juce::String id;
+         int rssi;
++        juce::String name;
+     };
+     
+@@ -31,21 +33,21 @@ public:
+     
+     // --- Connection Management ---
+     
+-    /** Connect to helper (non-blocking) */
+-    void connectToHelper();
++    /** Connect to Bridge (non-blocking) */
++    void connectToBridge();
+     
+-    /** Disconnect from helper */
++    /** Disconnect from Bridge */
+     void disconnect();
+     
+     /** Check if connected */
+     bool isConnected() const { return connected.load(); }
+     
+-    /** Launch helper app if not running */
+-    void launchHelper();
++    /** Launch Bridge app if not running */
++    void launchBridge();
+     
+     // --- BLE Commands ---
+     
+-    /** Start scanning for devices */
+-    void startScan();
+-    
+-    /** Stop scanning */
+-    void stopScan();
++    /** Start/stop scanning */
++    void startScan(bool enable);
+     
+     /** Connect to device by ID */
+@@ -55,19 +57,22 @@ public:
+     void disconnectDevice();
+     
++    /** Get thread-safe snapshot of device list */
++    juce::Array<DeviceInfo> getDevicesSnapshot();
++    
+     // --- Callbacks ---
+     
+-    void setDeviceListCallback(DeviceListCallback callback) { deviceListCallback = callback; }
+-    void setHeartRateCallback(HeartRateCallback callback) { heartRateCallback = callback; }
+-    void setStatusCallback(StatusCallback callback) { statusCallback = callback; }
+-    void setErrorCallback(ErrorCallback callback) { errorCallback = callback; }
++    std::function<void(const juce::String&)> onPermissionChanged;
++    std::function<void(const DeviceInfo&)> onDeviceFound;
++    std::function<void(int, double)> onHrData;
++    std::function<void(const juce::String&)> onError;
+     
+ private:
+     void run() override;
+     void sendCommand(const juce::var& command);
+-    void processMessage(const juce::String& message);
++    void processMessage(const juce::var& message);
++    bool connectToSocket();
++    void attemptReconnect();
++    void checkHeartbeat();
+     
+-    std::unique_ptr<juce::StreamingSocket> socket;
++    int socketFd{-1};
+     std::atomic<bool> connected{false};
+@@ -75,10 +80,13 @@ private:
+     
+-    DeviceListCallback deviceListCallback;
+-    HeartRateCallback heartRateCallback;
+-    StatusCallback statusCallback;
+-    ErrorCallback errorCallback;
++    juce::CriticalSection deviceListLock;
++    juce::Array<DeviceInfo> devices;
+     
+-    static constexpr int HELPER_PORT = 51721;
++    juce::String currentPermissionState{"unknown"};
++    double lastHeartbeatTime{0.0};
++    
++    int reconnectAttempts{0};
++    static constexpr int MAX_RECONNECT_ATTEMPTS = 10;
+     
+     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(HeartSyncBLEClient)
+ };
+
+diff --git a/HeartSync/Source/PluginProcessor.cpp b/HeartSync/Source/PluginProcessor.cpp
+index old..new 100644
+--- a/HeartSync/Source/PluginProcessor.cpp
++++ b/HeartSync/Source/PluginProcessor.cpp
+@@ -10,19 +10,18 @@ HeartSyncProcessor::HeartSyncProcessor()
+ {
+     // Set up BLE callbacks
+     #ifdef HEARTSYNC_USE_BRIDGE
+-    bleClient.setHeartRateCallback([this](int hr, const std::vector<float>& rr) {
+-        handleHeartRateUpdate(hr, rr);
+-        bleConnected = true;  // If we're getting data, we're connected
+-    });
++    bleClient.onHrData = [this](int bpm, double timestamp) {
++        std::vector<float> rrIntervals; // TODO: Bridge should send RR intervals
++        handleHeartRateUpdate(bpm, rrIntervals);
++        bleConnected = true;
++    };
+     
+-    bleClient.setStatusCallback([this](const juce::String& status) {
+-        DBG("BLE Status: " + status);
+-        if (status.contains("disconnected") || status.contains("error"))
++    bleClient.onPermissionChanged = [this](const juce::String& state) {
++        DBG("BLE Permission: " + state);
++        if (state == "denied")
+             bleConnected = false;
+-    });
++    };
+     
+-    bleClient.setErrorCallback([this](const juce::String& error) {
++    bleClient.onError = [this](const juce::String& error) {
+         DBG("BLE Error: " + error);
+         handleBLEDisconnect();
+-    });
++    };
+     
+-    // Auto-connect to helper on construction
+-    bleClient.connectToHelper();
++    // Auto-connect to Bridge on construction
++    bleClient.connectToBridge();
+     #else
+
+diff --git a/HeartSync/Source/PluginEditor.cpp b/HeartSync/Source/PluginEditor.cpp
+index old..new 100644
+--- a/HeartSync/Source/PluginEditor.cpp
++++ b/HeartSync/Source/PluginEditor.cpp
+@@ -224,27 +224,28 @@ void HeartSyncEditor::scanForDevices()
+     deviceSelector.clear();
+     
+     #ifdef HEARTSYNC_USE_BRIDGE
+-    // Set up callback to receive device list
+-    processorRef.getBLEClient().setDeviceListCallback([this](const std::vector<HeartSyncBLEClient::DeviceInfo>& devices) {
+-        // Update device list on message thread
+-        juce::MessageManager::callAsync([this, devices]() {
+-            deviceSelector.clear();
+-            
+-            int itemId = 1;
+-            for (const auto& device : devices)
+-            {
+-                juce::String displayName = device.id.substring(0, 17) + " (RSSI: " + juce::String(device.rssi) + ")";
+-                deviceSelector.addItem(displayName, itemId++);
+-            }
+-            
+-            if (devices.empty())
+-            {
+-                statusLabel.setText("No devices found - make sure device is advertising", juce::dontSendNotification);
+-            }
+-            else
+-            {
+-                statusLabel.setText("Found " + juce::String(devices.size()) + " device(s)", juce::dontSendNotification);
+-            }
+-        });
+-    });
++    // Set up callback to receive each device
++    processorRef.getBLEClient().onDeviceFound = [this](const HeartSyncBLEClient::DeviceInfo& device) {
++        // Update device list on message thread (already called async by client)
++        deviceSelector.clear();
++        
++        // Get full device list
++        auto devices = processorRef.getBLEClient().getDevicesSnapshot();
++        
++        int itemId = 1;
++        for (const auto& d : devices)
++        {
++            juce::String displayName = d.name + " (" + d.id.substring(0, 8) + "...) RSSI: " + juce::String(d.rssi);
++            deviceSelector.addItem(displayName, itemId++);
++        }
++        
++        if (devices.isEmpty())
++        {
++            statusLabel.setText("No devices found - make sure device is advertising", juce::dontSendNotification);
++        }
++        else
++        {
++            statusLabel.setText("Found " + juce::String(devices.size()) + " device(s)", juce::dontSendNotification);
++        }
++    };
+     
+-    // Start scan (no callback parameter)
+-    processorRef.getBLEClient().startScan();
++    // Start scan
++    processorRef.getBLEClient().startScan(true);
+     
+     // Stop scan after 5 seconds
+     juce::Timer::callAfterDelay(5000, [this]() {
+-        processorRef.getBLEClient().stopScan();
++        processorRef.getBLEClient().startScan(false);
+     });
+     #else
+
+*** END UNIFIED DIFF ***
+
+*** BUILD & VERIFY 2/6 ***
+cd HeartSync/build
+cmake .. -DHEARTSYNC_USE_BRIDGE=ON
+cmake --build . --config Release -j12
+
+Results:
+✓ Plugin builds successfully (no TCP code)
+✓ Plugin has NO CoreBluetooth symbols (verified with nm)
+✓ Bridge has CoreBluetooth framework
+✓ Client .cpp is 459 lines (complete UDS implementation)
+✓ UDS socket symbols present in client object file
+
+*** Protocol Implementation ***
+Send format:
+  uint32_t length = htonl(payloadSize);
+  send(fd, &length, 4, 0);
+  send(fd, payload, payloadSize, 0);
+
+Receive format:
+  recv(fd, &lengthPrefix, 4, 0);
+  uint32_t len = ntohl(lengthPrefix);
+  if (len > 64KB) { drop(); }
+  recv(fd, buffer, len, 0);
+
+Reconnect logic:
+  Attempt 0: 100ms
+  Attempt 1: 200ms
+  Attempt 2: 400ms + launch Bridge
+  Attempt 3: 800ms
+  Attempt 4: 1600ms
+  Attempt 5+: 5000ms (capped)
+  All with ±10% jitter
+
+*** Message Types Handled ***
+Outgoing:
+  - handshake{type,version}
+  - scan{type,on}
+  - connect{type,id}
+  - disconnect{type}
+
+Incoming:
+  - ready{type}
+  - permission{type,state}
+  - device_found{type,id,rssi,name}
+  - hr_data{type,bpm,timestamp}
+  - bridge_heartbeat{type,timestamp}
+  - error{type,message}
+
+*** Thread Safety ***
+✓ Device list protected by juce::CriticalSection
+✓ getDevicesSnapshot() returns copy (no locks held by caller)
+✓ All UI callbacks via MessageManager::callAsync
+✓ Socket operations exception-safe (try/catch in sendCommand)
+
+NEXT: P3/6 - Editor permission banner + final UI glue

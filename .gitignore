@@ -4,21 +4,23 @@ __pycache__/
 *$py.class
 *.so
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+.venv/
+venv/
+
+# Build directories
+HeartSyncVST3/build/
+HeartSync/build/
+*.vst3
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# JUCE
+*.jucer.bak
 
 # Virtual Environment
 venv/
@@ -46,3 +48,13 @@ install_manifest.txt
 *.dll
 *.dylib
 *.so
+HeartSync/**/CMakeFiles/
+HeartSync/**/CMakeCache.txt
+HeartSync/**/*.xcodeproj/*
+HeartSync/**/DerivedData/
+*.app
+*.trace
+*.dSYM
+*.log
+/packaging/macos/*.plist
+tools/__pycache__/

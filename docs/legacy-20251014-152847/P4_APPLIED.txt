@@ -1,0 +1,281 @@
+=== PATCH 4/6: Bridge UDS Path + Secure Permissions ===
+# Enforce socket security: 0600 perms, stale socket detection, single-instance protection
+
+*** STATUS: APPLIED & VERIFIED ***
+
+Changes Summary:
+1. Added HSAppSupportDir() helper - creates ~/Library/Application Support/HeartSync with 0700
+2. Added HSSocketPath() helper - returns full socket path
+3. Added HSVerifySocketPerms() - verifies chmod(0600) with stat()
+4. Enhanced stale socket detection - tries to connect before unlinking
+5. Single-instance protection via lockfile remains intact
+
+*** Key Security Features ***
+✓ Parent directory created with 0700 permissions (user-only access)
+✓ Socket created with 0600 permissions (user-only read/write)
+✓ Permissions verified with stat() after chmod
+✓ Stale socket detection: tries to connect before unlinking
+✓ Lockfile prevents multiple Bridge instances
+✓ Second launch exits gracefully (code 0) if instance already running
+
+*** BEGIN UNIFIED DIFF ***
+
+diff --git a/HeartSync/BridgeApp/HeartSyncBridge.m b/HeartSync/BridgeApp/HeartSyncBridge.m
+index old..new 100644
+--- a/HeartSync/BridgeApp/HeartSyncBridge.m
++++ b/HeartSync/BridgeApp/HeartSyncBridge.m
+@@ -8,6 +8,70 @@
+ #import <sys/stat.h>
+ #import <errno.h>
+ 
++// ============================================================================
++// Helper Functions for Secure Socket Path Management
++// ============================================================================
++
++/**
++ * Returns the HeartSync application support directory path.
++ * Creates the directory with 0700 permissions if it doesn't exist.
++ * @return Full path to ~/Library/Application Support/HeartSync
++ */
++static NSString* HSAppSupportDir(void) {
++    NSArray *paths = NSSearchPathForDirectoriesInDomains(
++        NSApplicationSupportDirectory, NSUserDomainMask, YES);
++    NSString *appSupport = [paths firstObject];
++    NSString *hsDir = [appSupport stringByAppendingPathComponent:@"HeartSync"];
++    
++    NSFileManager *fm = [NSFileManager defaultManager];
++    if (![fm fileExistsAtPath:hsDir]) {
++        NSError *error = nil;
++        [fm createDirectoryAtPath:hsDir
++              withIntermediateDirectories:YES
++                               attributes:@{NSFilePosixPermissions: @(0700)}
++                                    error:&error];
++        if (error) {
++            NSLog(@"[Bridge] Failed to create app support dir: %@", error);
++        }
++    }
++    
++    return hsDir;
++}
++
++/**
++ * Returns the full socket path.
++ * @return ~/Library/Application Support/HeartSync/bridge.sock
++ */
++static NSString* HSSocketPath(void) {
++    return [HSAppSupportDir() stringByAppendingPathComponent:@"bridge.sock"];
++}
++
++/**
++ * Verifies socket permissions are 0600 after chmod.
++ * @param socketPath Full path to the socket file
++ * @return YES if permissions are correct, NO otherwise
++ */
++static BOOL HSVerifySocketPerms(NSString *socketPath) {
++    struct stat st;
++    if (stat([socketPath fileSystemRepresentation], &st) != 0) {
++        NSLog(@"[Bridge] Failed to stat socket: %s", strerror(errno));
++        return NO;
++    }
++    
++    mode_t perms = st.st_mode & 0777;
++    if (perms != 0600) {
++        NSLog(@"[Bridge] WARNING: Socket permissions are 0%o, expected 0600", perms);
++        return NO;
++    }
++    
++    NSLog(@"[Bridge] ✓ Socket permissions verified: 0600");
++    return YES;
++}
++
++/**
++ * Checks if a socket at the given path is active (has a listening server).
++ * @param socketPath Full path to the socket file
++ * @return YES if socket is active/responsive, NO otherwise
++ */
++static BOOL HSIsSocketActive(NSString *socketPath) {
++    int testFd = socket(AF_UNIX, SOCK_STREAM, 0);
++    if (testFd < 0) {
++        return NO;
++    }
++    
++    struct sockaddr_un addr;
++    memset(&addr, 0, sizeof(addr));
++    addr.sun_family = AF_UNIX;
++    strncpy(addr.sun_path, [socketPath fileSystemRepresentation], sizeof(addr.sun_path) - 1);
++    
++    int result = connect(testFd, (struct sockaddr *)&addr, sizeof(addr));
++    close(testFd);
++    
++    return (result == 0);
++}
++
+ // ============================================================================
+ // HeartSyncBridge - Main Bridge Implementation
+ // ============================================================================
+@@ -51,31 +115,21 @@ static NSString *const kSocketPath = @"~/Library/Application Support/HeartSync/
+ 
+ - (BOOL)startUDSServer {
+-    // 1. Expand tilde in socket path
+-    NSString *socketPath = [kSocketPath stringByExpandingTildeInPath];
+-    NSString *socketDir = [socketPath stringByDeletingLastPathComponent];
+-    
+-    // 2. Create parent directory with 0700 permissions (user-only)
+-    NSFileManager *fm = [NSFileManager defaultManager];
+-    if (![fm fileExistsAtPath:socketDir]) {
+-        NSError *error = nil;
+-        [fm createDirectoryAtPath:socketDir
+-              withIntermediateDirectories:YES
+-                               attributes:@{NSFilePosixPermissions: @(0700)}
+-                                    error:&error];
+-        if (error) {
+-            NSLog(@"[Bridge] Failed to create socket dir: %@", error);
+-            return NO;
+-        }
+-    }
++    // 1. Get secure socket path (creates parent dir with 0700 if needed)
++    NSString *socketPath = HSSocketPath();
++    NSLog(@"[Bridge] Socket path: %@", socketPath);
+     
+-    // 3. Single-instance check: lockfile prevents multiple bridges
++    // 2. Single-instance check: lockfile prevents multiple bridges
+     NSString *lockPath = [socketPath stringByAppendingString:@".lock"];
+     int lockFd = open([lockPath fileSystemRepresentation], O_CREAT | O_EXCL | O_WRONLY, 0600);
+     if (lockFd < 0) {
+-        NSLog(@"[Bridge] Another instance is running (lockfile exists). Exiting.");
++        NSLog(@"[Bridge] Lockfile exists - another instance may be running");
++        if (HSIsSocketActive(socketPath)) {
++            NSLog(@"[Bridge] Socket is active - exiting gracefully");
++            exit(0);
++        }
++        NSLog(@"[Bridge] Stale lockfile detected - cleaning up");
++        unlink([lockPath fileSystemRepresentation]);
++        lockFd = open([lockPath fileSystemRepresentation], O_CREAT | O_EXCL | O_WRONLY, 0600);
++        if (lockFd < 0) {
++            NSLog(@"[Bridge] Failed to create lockfile after cleanup");
++            return NO;
++        }
+     }
+     close(lockFd);
+     
+-    // 4. Remove stale socket file
+-    unlink([socketPath fileSystemRepresentation]);
++    // 3. Check for stale socket: try to connect before unlinking
++    NSFileManager *fm = [NSFileManager defaultManager];
++    if ([fm fileExistsAtPath:socketPath]) {
++        if (HSIsSocketActive(socketPath)) {
++            NSLog(@"[Bridge] Socket is active - another instance running. Exiting.");
++            unlink([lockPath fileSystemRepresentation]);
++            exit(0);
++        }
++        NSLog(@"[Bridge] Removing stale socket");
++        unlink([socketPath fileSystemRepresentation]);
++    }
+     
+-    // 5. Create Unix domain socket
++    // 4. Create Unix domain socket
+     serverFd = socket(AF_UNIX, SOCK_STREAM, 0);
+     if (serverFd < 0) {
+         NSLog(@"[Bridge] Failed to create socket: %s", strerror(errno));
+@@ -98,7 +152,7 @@ static NSString *const kSocketPath = @"~/Library/Application Support/HeartSync/
+         return NO;
+     }
+     
+-    // 6. Bind to socket path
++    // 5. Bind to socket path
+     if (bind(serverFd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+         NSLog(@"[Bridge] Failed to bind socket: %s", strerror(errno));
+         close(serverFd);
+@@ -106,11 +160,16 @@ static NSString *const kSocketPath = @"~/Library/Application Support/HeartSync/
+         return NO;
+     }
+     
+-    // 7. Set socket permissions to 0600 (user-only read/write)
++    // 6. Set socket permissions to 0600 (user-only read/write)
+     if (chmod([socketPath fileSystemRepresentation], 0600) != 0) {
+         NSLog(@"[Bridge] Failed to set socket permissions: %s", strerror(errno));
+     }
+     
+-    // 8. Listen for connections
++    // 7. Verify permissions were applied correctly
++    if (!HSVerifySocketPerms(socketPath)) {
++        NSLog(@"[Bridge] Socket permission verification failed");
++    }
++    
++    // 8. Listen for connections (backlog of 5)
+     if (listen(serverFd, 5) < 0) {
+         NSLog(@"[Bridge] Failed to listen on socket: %s", strerror(errno));
+         close(serverFd);
+
+*** END UNIFIED DIFF ***
+
+*** BUILD & VERIFY 4/6 ***
+cd HeartSync/build
+cmake .. -DHEARTSYNC_USE_BRIDGE=ON
+cmake --build . --config Release -j12
+
+Results:
+✓ Build successful (100% complete, no errors)
+✓ Bridge installed to ~/Applications/HeartSync Bridge.app
+
+*** RUNTIME VERIFICATION ***
+# 1. Launch Bridge (headless)
+open ~/Applications/"HeartSync Bridge.app"
+
+# 2. Check socket path + permissions
+ls -la "$HOME/Library/Application Support/HeartSync/bridge.sock"
+Result: srw-------@ 1 gmc staff 0 Oct 14 14:33 .../bridge.sock
+✓ Socket exists with correct 0600 permissions (srw-------)
+
+# 3. Check directory permissions
+ls -la "$HOME/Library/Application Support/" | grep HeartSync
+Result: drwx------@ 4 gmc staff 128 Oct 14 14:33 HeartSync
+✓ Directory has correct 0700 permissions (drwx------)
+
+# 4. Verify CoreBluetooth linkage
+otool -L ~/Applications/"HeartSync Bridge.app"/Contents/MacOS/"HeartSync Bridge" | grep CoreBluetooth
+Result: /System/Library/Frameworks/CoreBluetooth.framework/...
+✓ Bridge has CoreBluetooth framework
+
+# 5. Verify plugin has NO CoreBluetooth
+nm -gU ~/Library/Audio/Plug-Ins/Components/HeartSync.component/Contents/MacOS/HeartSync | grep -i bluetooth
+Result: (empty output)
+✓ Plugin has no CoreBluetooth symbols
+
+# 6. Test single-instance protection
+open ~/Applications/"HeartSync Bridge.app"  # Try to launch second instance
+ps aux | grep "HeartSync Bridge" | grep -v grep | wc -l
+Result: 1
+✓ Only 1 instance running (second instance exited gracefully)
+
+*** P4 ACCEPTANCE CRITERIA - ALL PASSED ✓ ***
+1. ✓ bridge.sock exists at exact path: ~/Library/Application Support/HeartSync/bridge.sock
+2. ✓ Socket has correct permissions: srw------- (0600)
+3. ✓ Parent directory has correct permissions: drwx------ (0700)
+4. ✓ Re-launching Bridge while one is running does NOT clobber socket
+5. ✓ Second instance detects lockfile + active socket and exits gracefully
+6. ✓ Stale socket detection: tries to connect before unlinking
+7. ✓ Permissions verified with stat() after chmod
+8. ✓ Bridge has CoreBluetooth, plugin does NOT
+
+*** Security Improvements ***
+✓ HSAppSupportDir() - Centralized directory creation with 0700 perms
+✓ HSSocketPath() - Single source of truth for socket path
+✓ HSVerifySocketPerms() - Explicit verification with stat()
+✓ HSIsSocketActive() - Tests if socket is responsive before cleanup
+✓ Enhanced lockfile logic - cleans up stale lockfile if socket is dead
+✓ Graceful exit on second launch (exit(0) not exit(1))
+
+*** Thread Safety Notes ***
+- Socket creation happens in main thread before any async operations
+- Lockfile prevents race conditions between multiple launches
+- chmod() + stat() verification happens synchronously
+- No locks needed - single-threaded server startup
+
+*** Lines Changed ***
+Total: ~85 lines
+- Added 4 helper functions: HSAppSupportDir, HSSocketPath, HSVerifySocketPerms, HSIsSocketActive
+- Modified startUDSServer: enhanced stale detection, added verification
+- Well under 250-line limit ✓
+
+NEXT: P5/6 - DeviceInfo display helpers + connected/disconnected state handling

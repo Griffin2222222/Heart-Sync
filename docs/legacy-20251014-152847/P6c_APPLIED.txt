@@ -1,0 +1,232 @@
+=== PATCH 6c/6: UDS Smoke Test Tool ===
+# Python script for end-to-end UDS protocol testing
+
+*** STATUS: APPLIED & VERIFIED ***
+
+Changes Summary:
+1. Created tools/uds_send.py - 220-line Python script for UDS testing
+2. Implements length-prefixed JSON protocol (matches client/bridge)
+3. Supports all message types: ready, perm, device, connected, hr, disconnected
+
+*** Key Features ***
+✓ Connects to ~/Library/Application Support/HeartSync/bridge.sock
+✓ Sends 4-byte big-endian length prefix + JSON payload
+✓ Receives and parses responses from Bridge
+✓ Error handling for missing socket, connection failures, invalid messages
+✓ Exit codes: 0 for success, 1 for error
+✓ Human-readable console output with status indicators
+
+*** FILE CREATED ***
+
+tools/uds_send.py (220 lines, executable)
+
+*** USAGE ***
+
+# Send fake device discovery
+python3 tools/uds_send.py device
+
+# Send permission state
+python3 tools/uds_send.py perm AUTHORIZED
+python3 tools/uds_send.py perm DENIED
+
+# Send connected event
+python3 tools/uds_send.py connected
+
+# Send heart rate data
+python3 tools/uds_send.py hr 72
+
+# Send disconnected event
+python3 tools/uds_send.py disconnected
+
+# Send ready handshake
+python3 tools/uds_send.py ready
+
+*** TEST RUN ***
+cd /Users/gmc/Documents/GitHub/Heart-Sync
+python3 tools/uds_send.py device
+
+Output:
+✓ Connected to /Users/gmc/Library/Application Support/HeartSync/bridge.sock
+✓ Sent: {"type": "device_found", "id": "AA:BB:CC:DD:EE:FF", "rssi": -60, "name": "Polar H10 1234"}
+✓ Received: {"type": "ready", "version": 1, "timestamp": 1760414842.2695332}
+✓ Bridge acknowledged
+✓ Disconnected
+
+*** P6c ACCEPTANCE CRITERIA - ALL PASSED ✓ ***
+1. ✓ Script connects to UDS socket successfully
+2. ✓ Implements 4-byte big-endian length prefix
+3. ✓ Sends valid JSON messages
+4. ✓ Receives and parses Bridge responses
+5. ✓ Exits non-zero on errors (socket not found, connection failure)
+6. ✓ Supports all required message types
+7. ✓ Validates input (BPM range, permission states)
+
+*** Message Types Supported ***
+
+**ready**:
+```json
+{"type": "ready", "version": 1}
+```
+
+**perm AUTHORIZED|DENIED|UNKNOWN|REQUESTING**:
+```json
+{"type": "permission", "state": "authorized"}
+```
+
+**device**:
+```json
+{
+  "type": "device_found",
+  "id": "AA:BB:CC:DD:EE:FF",
+  "rssi": -60,
+  "name": "Polar H10 1234"
+}
+```
+
+**connected**:
+```json
+{"type": "connected", "id": "AA:BB:CC:DD:EE:FF"}
+```
+
+**hr 72**:
+```json
+{
+  "type": "hr_data",
+  "bpm": 72,
+  "ts": 1760414842.269
+}
+```
+
+**disconnected**:
+```json
+{"type": "disconnected", "reason": "debug"}
+```
+
+*** Protocol Implementation ***
+
+**Send Path**:
+1. Serialize message to JSON string
+2. Encode as UTF-8 bytes
+3. Check size ≤ 64KB
+4. Pack length as 4-byte big-endian: `struct.pack('>I', len(payload))`
+5. Send: length_prefix (4 bytes) + payload
+
+**Receive Path**:
+1. Read 4 bytes (length prefix)
+2. Unpack as big-endian: `struct.unpack('>I', data)[0]`
+3. Validate ≤ 64KB
+4. Read payload (may need multiple recv() calls)
+5. Parse JSON
+
+*** Error Handling ***
+
+**Socket not found**:
+```
+ERROR: Socket not found at ~/Library/Application Support/HeartSync/bridge.sock
+Make sure HeartSync Bridge is running.
+Exit code: 1
+```
+
+**Connection failure**:
+```
+ERROR connecting to socket: [Errno 61] Connection refused
+Exit code: 1
+```
+
+**Invalid command**:
+```
+ERROR: Unknown command 'foo'
+Exit code: 1
+```
+
+**Invalid BPM**:
+```
+ERROR: Invalid BPM 'abc' (must be integer)
+Exit code: 1
+```
+
+**BPM out of range**:
+```
+WARNING: BPM 250 outside normal range (30-220)
+(still sends, but warns)
+```
+
+*** Integration Testing Workflow ***
+
+# 1. Start Bridge
+open ~/Applications/"HeartSync Bridge.app"
+
+# 2. Verify socket exists
+ls -la ~/Library/Application\ Support/HeartSync/bridge.sock
+
+# 3. Send permission
+python3 tools/uds_send.py perm AUTHORIZED
+
+# 4. Send device
+python3 tools/uds_send.py device
+
+# 5. Connect
+python3 tools/uds_send.py connected
+
+# 6. Send HR stream
+for i in {60..80}; do
+  python3 tools/uds_send.py hr $i
+  sleep 0.1
+done
+
+# 7. Disconnect
+python3 tools/uds_send.py disconnected
+
+*** Use Cases ***
+
+**Protocol Debugging**:
+- Verify Bridge accepts correctly-formatted messages
+- Test edge cases (large payloads, invalid JSON)
+- Validate length-prefix encoding/decoding
+
+**End-to-End Testing**:
+- Inject events without physical hardware
+- Test client reconnection behavior
+- Stress-test with rapid message bursts
+
+**Development Workflow**:
+- Quick sanity check after Bridge changes
+- Verify socket permissions/path
+- Test protocol changes before updating client
+
+*** Lines of Code ***
+Total: 220 lines
+- Connection handling: 30 lines
+- Send/receive functions: 60 lines
+- Command implementations: 80 lines
+- Main logic: 50 lines
+- Well under 250-line limit ✓
+
+*** Dependencies ***
+- Python 3.x (no external packages)
+- socket (stdlib)
+- json (stdlib)
+- struct (stdlib)
+- sys, time, os, pathlib (stdlib)
+
+No pip install required! ✓
+
+*** COMPLETION: P6a + P6b + P6c = Full Debug & Testing Suite ***
+
+P6a ✓ - Client debug injection methods
+P6b ✓ - Editor debug UI (5-step workflow button)
+P6c ✓ - UDS smoke test tool (Python script)
+
+Total lines: ~135 + 75 + 220 = 430 lines across 3 mini-patches
+All under individual limits (150 + 120 + 250) ✓
+
+*** Final Verification Checklist ***
+✓ Plugin has no CoreBluetooth symbols
+✓ Bridge has CoreBluetooth framework
+✓ UDS socket exists at correct path with 0600 perms
+✓ Debug button visible in DEBUG builds only
+✓ Debug injection methods work without hardware
+✓ uds_send.py successfully communicates with Bridge
+✓ No regressions to P1-P5 functionality
+
+COMPLETE: All 6 patches delivered (P1-P6) ✓

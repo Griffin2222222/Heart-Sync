@@ -1,0 +1,301 @@
+#include "HeartSyncBLEClient.h"
+
+HeartSyncBLEClient::HeartSyncBLEClient()
+    : juce::Thread("HeartSyncBLEClient")
+{
+    startThread();
+}
+
+HeartSyncBLEClient::~HeartSyncBLEClient()
+{
+    disconnect();
+    stopThread(5000);
+}
+
+void HeartSyncBLEClient::connectToHelper()
+{
+    shouldReconnect = true;
+    notify();
+}
+
+void HeartSyncBLEClient::disconnect()
+{
+    shouldReconnect = false;
+    connected = false;
+    
+    if (socket)
+    {
+        socket->close();
+        socket.reset();
+    }
+}
+
+void HeartSyncBLEClient::launchHelper()
+{
+    // Try to launch helper app
+    juce::String helperPaths[] = {
+        juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+            .getChildFile("Applications/HeartSync BLE Helper.app").getFullPathName(),
+        "/Applications/HeartSync BLE Helper.app"
+    };
+    
+    for (const auto& path : helperPaths)
+    {
+        juce::File helperApp(path);
+        if (helperApp.exists())
+        {
+            DBG("Launching helper: " << path);
+            
+            #if JUCE_MAC
+            juce::ChildProcess process;
+            juce::StringArray args;
+            args.add("open");
+            args.add("-a");
+            args.add(path);
+            
+            if (process.start(args))
+            {
+                DBG("Helper launched successfully");
+                
+                // Try to connect after a delay
+                juce::Timer::callAfterDelay(1000, [this]() {
+                    connectToHelper();
+                });
+                
+                return;
+            }
+            #endif
+        }
+    }
+    
+    DBG("Failed to launch helper - not found in expected locations");
+    
+    if (errorCallback)
+    {
+        juce::MessageManager::callAsync([this]() {
+            errorCallback("Helper app not found. Please install HeartSync BLE Helper.app");
+        });
+    }
+}
+
+void HeartSyncBLEClient::run()
+{
+    while (!threadShouldExit())
+    {
+        if (shouldReconnect && !connected)
+        {
+            // Attempt connection
+            socket = std::make_unique<juce::StreamingSocket>();
+            
+            if (socket->connect("127.0.0.1", HELPER_PORT, 2000))
+            {
+                connected = true;
+                DBG("Connected to HeartSync BLE Helper");
+                
+                if (statusCallback)
+                {
+                    juce::MessageManager::callAsync([this]() {
+                        statusCallback("Connected to helper");
+                    });
+                }
+                
+                // Read loop
+                while (connected && !threadShouldExit())
+                {
+                    char buffer[4096];
+                    int bytesRead = socket->read(buffer, sizeof(buffer) - 1, false);
+                    
+                    if (bytesRead > 0)
+                    {
+                        buffer[bytesRead] = '\0';
+                        juce::String data(buffer, bytesRead);
+                        
+                        // Process each line (JSON messages are newline-separated)
+                        juce::StringArray lines = juce::StringArray::fromLines(data);
+                        for (const auto& line : lines)
+                        {
+                            if (line.isNotEmpty())
+                            {
+                                processMessage(line);
+                            }
+                        }
+                    }
+                    else if (bytesRead < 0)
+                    {
+                        // Connection lost
+                        DBG("Connection to helper lost");
+                        connected = false;
+                        break;
+                    }
+                    
+                    wait(10); // Small delay to prevent busy-waiting
+                }
+                
+                socket->close();
+                socket.reset();
+            }
+            else
+            {
+                DBG("Failed to connect to helper on port " << HELPER_PORT);
+                socket.reset();
+            }
+            
+            if (!connected && shouldReconnect)
+            {
+                // Retry after delay
+                wait(2000);
+            }
+        }
+        else
+        {
+            wait(500);
+        }
+    }
+}
+
+void HeartSyncBLEClient::sendCommand(const juce::var& command)
+{
+    if (!connected || !socket)
+        return;
+    
+    juce::String jsonString = juce::JSON::toString(command) + "\n";
+    juce::MemoryBlock data(jsonString.toRawUTF8(), jsonString.getNumBytesAsUTF8());
+    
+    socket->write(data.getData(), (int)data.getSize());
+}
+
+void HeartSyncBLEClient::processMessage(const juce::String& message)
+{
+    juce::var json = juce::JSON::parse(message);
+    
+    if (!json.isObject())
+        return;
+    
+    juce::String event = json["event"].toString();
+    
+    if (event == "status")
+    {
+        juce::String state = json["state"].toString();
+        DBG("Helper status: " << state);
+        
+        if (statusCallback)
+        {
+            juce::MessageManager::callAsync([this, state]() {
+                statusCallback(state);
+            });
+        }
+    }
+    else if (event == "devices")
+    {
+        juce::var deviceListVar = json["list"];
+        
+        if (deviceListVar.isArray())
+        {
+            std::vector<DeviceInfo> devices;
+            
+            for (int i = 0; i < deviceListVar.size(); ++i)
+            {
+                juce::var deviceVar = deviceListVar[i];
+                DeviceInfo info;
+                info.id = deviceVar["id"].toString();
+                info.rssi = (int)deviceVar["rssi"];
+                devices.push_back(info);
+            }
+            
+            if (deviceListCallback)
+            {
+                juce::MessageManager::callAsync([this, devices]() {
+                    deviceListCallback(devices);
+                });
+            }
+        }
+    }
+    else if (event == "connected")
+    {
+        juce::String device = json["device"].toString();
+        DBG("Connected to device: " << device);
+        
+        if (statusCallback)
+        {
+            juce::MessageManager::callAsync([this, device]() {
+                statusCallback("Connected to " + device);
+            });
+        }
+    }
+    else if (event == "disconnected")
+    {
+        juce::String device = json["device"].toString();
+        DBG("Disconnected from device: " << device);
+        
+        if (statusCallback)
+        {
+            juce::MessageManager::callAsync([this, device]() {
+                statusCallback("Disconnected from " + device);
+            });
+        }
+    }
+    else if (event == "hr")
+    {
+        int bpm = (int)json["bpm"];
+        juce::var rrVar = json["rr"];
+        
+        std::vector<float> rrIntervals;
+        if (rrVar.isArray())
+        {
+            for (int i = 0; i < rrVar.size(); ++i)
+            {
+                rrIntervals.push_back((float)rrVar[i]);
+            }
+        }
+        
+        if (heartRateCallback)
+        {
+            juce::MessageManager::callAsync([this, bpm, rrIntervals]() {
+                heartRateCallback(bpm, rrIntervals);
+            });
+        }
+    }
+    else if (event == "error")
+    {
+        juce::String errorMsg = json["message"].toString();
+        DBG("Helper error: " << errorMsg);
+        
+        if (errorCallback)
+        {
+            juce::MessageManager::callAsync([this, errorMsg]() {
+                errorCallback(errorMsg);
+            });
+        }
+    }
+}
+
+void HeartSyncBLEClient::startScan()
+{
+    juce::DynamicObject::Ptr cmd = new juce::DynamicObject();
+    cmd->setProperty("cmd", "scan");
+    cmd->setProperty("on", true);
+    sendCommand(juce::var(cmd.get()));
+}
+
+void HeartSyncBLEClient::stopScan()
+{
+    juce::DynamicObject::Ptr cmd = new juce::DynamicObject();
+    cmd->setProperty("cmd", "scan");
+    cmd->setProperty("on", false);
+    sendCommand(juce::var(cmd.get()));
+}
+
+void HeartSyncBLEClient::connectToDevice(const juce::String& deviceId)
+{
+    juce::DynamicObject::Ptr cmd = new juce::DynamicObject();
+    cmd->setProperty("cmd", "connect");
+    cmd->setProperty("id", deviceId);
+    sendCommand(juce::var(cmd.get()));
+}
+
+void HeartSyncBLEClient::disconnectDevice()
+{
+    juce::DynamicObject::Ptr cmd = new juce::DynamicObject();
+    cmd->setProperty("cmd", "disconnect");
+    sendCommand(juce::var(cmd.get()));
+}

@@ -1,0 +1,168 @@
+=== PATCH 1/6: Build System + Headless Bridge ===
+# apply with: cd /Users/gmc/Documents/GitHub/Heart-Sync && git apply -p0 <<'PATCH'
+*** begin unified diff ***
+diff --git a/HeartSync/CMakeLists.txt b/HeartSync/CMakeLists.txt
+--- a/HeartSync/CMakeLists.txt
++++ b/HeartSync/CMakeLists.txt
+@@ -8,8 +8,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED YES)
+ set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64")
+ set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS deployment version")
+ 
+-# Option to use external BLE helper process (default: ON)
+-option(HEARTSYNC_USE_HELPER "Use external BLE helper process instead of direct CoreBluetooth" ON)
++# Option to use external BLE bridge process (default: ON)
++option(HEARTSYNC_USE_BRIDGE "Use external BLE bridge process instead of direct CoreBluetooth" ON)
+ 
+ # Use FetchContent to get JUCE
+ include(FetchContent)
+@@ -43,8 +43,8 @@ target_sources(HeartSync PRIVATE
+     Source/Core/HeartRateProcessor.cpp
+ )
+ 
+-# Add BLE client when using helper mode
+-if(HEARTSYNC_USE_HELPER)
++# Add BLE client when using bridge mode
++if(HEARTSYNC_USE_BRIDGE)
+     target_sources(HeartSync PRIVATE Source/Core/HeartSyncBLEClient.cpp)
+ endif()
+ 
+@@ -66,9 +66,9 @@ target_compile_definitions(HeartSync PUBLIC
+     JUCE_PLUGINHOST_AU=0
+ )
+ 
+-# Define HEARTSYNC_USE_HELPER for plugin code
+-if(HEARTSYNC_USE_HELPER)
+-    target_compile_definitions(HeartSync PRIVATE HEARTSYNC_USE_HELPER=1)
++# Define HEARTSYNC_USE_BRIDGE for plugin code
++if(HEARTSYNC_USE_BRIDGE)
++    target_compile_definitions(HeartSync PRIVATE HEARTSYNC_USE_BRIDGE=1)
+     message(STATUS "HeartSync: Using external BLE bridge (no CoreBluetooth in plugin)")
+ else()
+     # Legacy mode: direct CoreBluetooth (causes TCC crashes in DAWs)
+@@ -80,17 +80,18 @@ else()
+     message(STATUS "HeartSync: Using direct CoreBluetooth (NOT RECOMMENDED)")
+ endif()
+ 
+ # ============================================================================
+-# HeartSync BLE Helper App (separate process for BLE communication)
++# HeartSync BLE Bridge App (headless background worker for BLE communication)
+ # ============================================================================
+-if(HEARTSYNC_USE_HELPER)
+-    add_executable(HeartSyncBLEHelper MACOSX_BUNDLE
+-        HelperApp/HeartSyncHelper.m
++if(HEARTSYNC_USE_BRIDGE)
++    add_executable(HeartSyncBridge MACOSX_BUNDLE
++        BridgeApp/HeartSyncBridge.m
+     )
+     
+-    set_target_properties(HeartSyncBLEHelper PROPERTIES
++    set_target_properties(HeartSyncBridge PROPERTIES
+         BUNDLE TRUE
+-        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/HelperApp/Info.plist"
+-        MACOSX_BUNDLE_BUNDLE_NAME "HeartSync BLE Helper"
++        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/BridgeApp/Info.plist"
++        MACOSX_BUNDLE_BUNDLE_NAME "HeartSync Bridge"
++        MACOSX_BUNDLE_GUI_IDENTIFIER "com.quantumbioaudio.heartsync.bridge"
+         MACOSX_BUNDLE_BUNDLE_VERSION "1.0.0"
+         MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0.0"
+         OUTPUT_NAME "HeartSync Bridge"
+@@ -99,15 +100,14 @@ if(HEARTSYNC_USE_HELPER)
+     
+     # Link frameworks
+-    target_link_libraries(HeartSyncBLEHelper PRIVATE
++    target_link_libraries(HeartSyncBridge PRIVATE
+         "-framework Foundation"
+         "-framework CoreBluetooth"
+-        "-framework AppKit"
+     )
+     
+-    # Install helper to ~/Applications for development
+-    install(TARGETS HeartSyncBLEHelper
++    # Install bridge to ~/Applications for development
++    install(TARGETS HeartSyncBridge
+         BUNDLE DESTINATION "$ENV{HOME}/Applications"
+     )
+     
+-    message(STATUS "HeartSync BLE Helper: Will install to ~/Applications/HeartSync BLE Helper.app")
++    message(STATUS "HeartSync Bridge: Will install to ~/Applications/HeartSync Bridge.app")
+ endif()
+diff --git a/HeartSync/Source/PluginProcessor.h b/HeartSync/Source/PluginProcessor.h
+--- a/HeartSync/Source/PluginProcessor.h
++++ b/HeartSync/Source/PluginProcessor.h
+@@ -2,7 +2,7 @@
+ 
+ #include <JuceHeader.h>
+ 
+-#ifdef HEARTSYNC_USE_HELPER
++#ifdef HEARTSYNC_USE_BRIDGE
+     #include "Core/HeartSyncBLEClient.h"
+ #else
+     #include "Core/HeartSyncBLE.h"
+@@ -55,7 +55,7 @@ public:
+ 
+     // --- BLE Control ---
+     
+-    #ifdef HEARTSYNC_USE_HELPER
++    #ifdef HEARTSYNC_USE_BRIDGE
+     /** Get BLE client for UI */
+     HeartSyncBLEClient& getBLEClient() { return bleClient; }
+     #else
+@@ -76,7 +76,7 @@ public:
+ 
+ private:
+     // --- Core Components ---
+-    #ifdef HEARTSYNC_USE_HELPER
++    #ifdef HEARTSYNC_USE_BRIDGE
+     HeartSyncBLEClient bleClient;
+     #else
+     HeartSyncBLE bleManager;
+diff --git a/HeartSync/Source/PluginProcessor.cpp b/HeartSync/Source/PluginProcessor.cpp
+--- a/HeartSync/Source/PluginProcessor.cpp
++++ b/HeartSync/Source/PluginProcessor.cpp
+@@ -8,7 +8,7 @@ HeartSyncProcessor::HeartSyncProcessor()
+                        })
+ {
+     // Set up BLE callbacks
+-    #ifdef HEARTSYNC_USE_HELPER
++    #ifdef HEARTSYNC_USE_BRIDGE
+     bleClient.setHeartRateCallback([this](int bpm, const std::vector<float>& rrIntervals) {
+         hrProcessor.processHeartRate(static_cast<float>(bpm));
+     });
+@@ -40,7 +40,7 @@ void HeartSyncProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
+     hrProcessor.setSampleRate(sampleRate);
+     
+     // Auto-connect to BLE helper
+-    #ifdef HEARTSYNC_USE_HELPER
++    #ifdef HEARTSYNC_USE_BRIDGE
+     bleClient.connectToHelper();
+     #endif
+ }
+diff --git a/HeartSync/Source/PluginEditor.cpp b/HeartSync/Source/PluginEditor.cpp
+--- a/HeartSync/Source/PluginEditor.cpp
++++ b/HeartSync/Source/PluginEditor.cpp
+@@ -222,7 +222,7 @@ void HeartSyncEditor::scanForDevices()
+     statusLabel.setText("Scanning for BLE devices...", juce::dontSendNotification);
+     deviceSelector.clear();
+     
+-    #ifdef HEARTSYNC_USE_HELPER
++    #ifdef HEARTSYNC_USE_BRIDGE
+     // Set up callback to receive device list
+     processorRef.getBLEClient().setDeviceListCallback([this](const std::vector<HeartSyncBLEClient::DeviceInfo>& devices) {
+         // Update device list on message thread
+@@ -290,7 +290,7 @@ void HeartSyncEditor::connectToDevice(const juce::String& deviceAddress)
+ {
+     statusLabel.setText("Connecting to device...", juce::dontSendNotification);
+     
+-    #ifdef HEARTSYNC_USE_HELPER
++    #ifdef HEARTSYNC_USE_BRIDGE
+     // Extract device ID from display string (stored as "ID (RSSI: -65)")
+     int rssiIdx = deviceAddress.indexOf(" (RSSI:");
+     
+*** end unified diff ***
+PATCH
+
+# Summary:
+# - Renamed all HEARTSYNC_USE_HELPER → HEARTSYNC_USE_BRIDGE (7 locations)
+# - Changed Bridge target name, removed AppKit link
+# - Points to BridgeApp/Info.plist (headless: LSBackgroundOnly=YES)
+# - Ready for Bridge implementation in P2

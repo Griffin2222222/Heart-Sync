@@ -31,32 +31,28 @@ FetchContent_MakeAvailable(JUCE)
 
 # Create the plugin target
 juce_add_plugin(HeartSyncVST3
-    COMPANY_NAME "HeartSyncAudio"
-    BUNDLE_ID "com.heartsyncaudio.heartsyncvst3"
-    PLUGIN_MANUFACTURER_CODE HSAu
-    PLUGIN_CODE HSM3
+    COMPANY_NAME "Conscious Audio"
+    BUNDLE_ID "com.consciousaudio.heartsync"
+    PLUGIN_MANUFACTURER_CODE ConA
+    PLUGIN_CODE HSyc
     FORMATS VST3 Standalone
-    PRODUCT_NAME "HeartSync Modulator"
-    PLUGIN_NAME "HeartSync Modulator"
-    DESCRIPTION "Heart rate reactive modulation plugin with Bluetooth LE support"
+    PRODUCT_NAME "HeartSync"
+    PLUGIN_NAME "HeartSync"
+    DESCRIPTION "Professional heart rate reactive modulation plugin with Bluetooth LE support"
     PLUGIN_VERSION "1.0.0"
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT TRUE
     IS_MIDI_EFFECT FALSE)
 
-# Add source files
+# Add source files (progressive professional build)
 target_sources(HeartSyncVST3 PRIVATE
-    Source/PluginProcessor.cpp
-    Source/PluginProcessor.h
+    Source/PluginProcessor_Professional.cpp
+    Source/PluginProcessor_Professional.h
     Source/PluginEditor.cpp
     Source/PluginEditor.h
-    Source/Core/BluetoothManager.cpp
     Source/Core/BluetoothManager.h
-    Source/Core/HeartRateProcessor.cpp
-    Source/Core/HeartRateProcessor.h
-    Source/Core/OscSenderManager.cpp
-    Source/Core/OscSenderManager.h)
+    Source/Core/BluetoothManager_Native.mm)
 
 # Link JUCE modules to the plugin target
 target_link_libraries(HeartSyncVST3 PRIVATE
@@ -67,11 +63,11 @@ target_link_libraries(HeartSyncVST3 PRIVATE
     juce::juce_audio_utils
     juce::juce_core
     juce::juce_data_structures
+    juce::juce_dsp
     juce::juce_events
     juce::juce_graphics
     juce::juce_gui_basics
     juce::juce_gui_extra
-    juce::juce_osc
 )
 
 # Platform-specific libraries
@@ -91,6 +87,13 @@ if(WIN32)
         )
         message(STATUS "Linking standard Windows libraries for MinGW")
     endif()
+elseif(APPLE)
+    # macOS Core Bluetooth framework for Bluetooth LE support
+    target_link_libraries(HeartSyncVST3 PRIVATE 
+        "-framework CoreBluetooth"
+        "-framework Foundation"
+    )
+    message(STATUS "Linking Core Bluetooth framework for macOS")
 endif()
 
 # Preprocessor definitions

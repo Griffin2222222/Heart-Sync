@@ -1,0 +1,125 @@
+=== PATCH 1/6: Build System + Headless Info.plist ===
+# Apply with: cd HeartSync && git apply <<'PATCH'
+
+*** STATUS: APPLIED & VERIFIED ***
+
+Changes Made:
+1. CMakeLists.txt - Already had HEARTSYNC_USE_BRIDGE, added AppKit link
+2. BridgeApp/Info.plist - Already existed with LSBackgroundOnly=YES
+3. BridgeApp/HeartSyncBridge.h - Added AppKit import, isConnected method
+4. BridgeApp/HeartSyncBridge.m - Fixed syntax errors, added weakSelf, isConnected impl
+5. Plugin source files - Already migrated to HEARTSYNC_USE_BRIDGE
+
+*** begin unified diff ***
+diff --git a/HeartSync/CMakeLists.txt b/HeartSync/CMakeLists.txt
+index original..modified 100644
+--- a/HeartSync/CMakeLists.txt
++++ b/HeartSync/CMakeLists.txt
+@@ -100,6 +100,7 @@ if(HEARTSYNC_USE_BRIDGE)
+     target_link_libraries(HeartSyncBridge PRIVATE
+         "-framework Foundation"
+         "-framework CoreBluetooth"
++        "-framework AppKit"
+     )
+     
+     # Install bridge to ~/Applications for development
+
+diff --git a/HeartSync/BridgeApp/HeartSyncBridge.h b/HeartSync/BridgeApp/HeartSyncBridge.h
+index original..modified 100644
+--- a/HeartSync/BridgeApp/HeartSyncBridge.h
++++ b/HeartSync/BridgeApp/HeartSyncBridge.h
+@@ -6,6 +6,7 @@
+ //
+ 
+ #import <Foundation/Foundation.h>
++#import <AppKit/AppKit.h>
+ #import <CoreBluetooth/CoreBluetooth.h>
+ 
+ NS_ASSUME_NONNULL_BEGIN
+@@ -57,6 +58,7 @@ NS_ASSUME_NONNULL_BEGIN
+ - (void)connectToDevice:(NSString *)deviceId;
+ - (void)disconnect;
+ - (NSString *)permissionState;
++- (BOOL)isConnected;
+ 
+ @end
+ 
+
+diff --git a/HeartSync/BridgeApp/HeartSyncBridge.m b/HeartSync/BridgeApp/HeartSyncBridge.m
+index original..modified 100644
+--- a/HeartSync/BridgeApp/HeartSyncBridge.m
++++ b/HeartSync/BridgeApp/HeartSyncBridge.m
+@@ -6,6 +6,7 @@
+ //
+ 
+ #import "HeartSyncBridge.h"
++#import <AppKit/AppKit.h>
+ #import <sys/socket.h>
+ #import <sys/un.h>
+ #import <sys/stat.h>
+@@ -84,8 +85,7 @@
+     struct sockaddr_un addr;
+     memset(&addr, 0, sizeof(addr));
+     addr.sun_family = AF_UNIX;
+-    strncpy(addr.sun_len = 0;
+-    strncpy(addr.sun_path, [socketPath UTF8String], sizeof(addr.sun_path) - 1);
++    strncpy(addr.sun_path, [socketPath UTF8String], sizeof(addr.sun_path) - 1);
+     
+     if (bind(_serverSocket, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+         NSLog(@"[Bridge] Failed to bind socket at %@", socketPath);
+@@ -183,6 +183,7 @@
+             NSError *error = nil;
+             NSDictionary *message = [NSJSONSerialization JSONObjectWithData:payloadData options:0 error:&error];
+             if (message && self.messageHandler) {
++                __weak typeof(self) weakSelf = self;
+                 dispatch_async(dispatch_get_main_queue(), ^{
+                     __strong typeof(self) strongSelf = weakSelf;
+                     if (strongSelf && strongSelf.messageHandler) {
+@@ -275,6 +276,10 @@
+     return @"unknown";
+ }
+ 
++- (BOOL)isConnected {
++    return _connectedPeripheral != nil;
++}
++
+ - (void)startScanning {
+     if (_isScanning) return;
+     
+@@ -544,7 +549,7 @@
+         [_server sendMessage:@{
+             @"type": @"status",
+             @"permission": [_bleManager permissionState],
+-            @"connected": @(_bleManager->_connectedPeripheral != nil)
++            @"connected": @([_bleManager isConnected])
+         }];
+     }
+ }
+*** end unified diff ***
+PATCH
+
+BUILD RESULTS:
+✓ Plugin builds successfully
+✓ Bridge builds successfully
+✓ Plugin has NO CoreBluetooth symbols (verified with nm -gU)
+✓ Bridge has CoreBluetooth + AppKit + Foundation frameworks
+✓ Info.plist has LSBackgroundOnly=1 and LSUIElement=1
+✓ Bundle ID: com.quantumbioaudio.heartsync.bridge
+
+VERIFICATION:
+cd HeartSync/build
+cmake .. -DHEARTSYNC_USE_BRIDGE=ON
+cmake --build . --config Release -j12
+cp -r "HeartSync Bridge.app" ~/Applications/
+
+# Check symbols
+nm -gU ~/Library/Audio/Plug-Ins/Components/HeartSync.component/Contents/MacOS/HeartSync | grep bluetooth
+# => (no output = PASS)
+
+otool -L ~/Applications/"HeartSync Bridge.app"/Contents/MacOS/"HeartSync Bridge" | grep CoreBluetooth
+# => /System/Library/Frameworks/CoreBluetooth.framework (PASS)
+
+plutil -p ~/Applications/"HeartSync Bridge.app"/Contents/Info.plist | grep LSBackgroundOnly
+# => "LSBackgroundOnly" => 1 (PASS)
+
+NEXT: P2/6 - Client Transport (TCP→UDS, length-prefix, auto-launch)
