@@ -4,6 +4,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "PluginProcessor_Professional.h"
 
+<<<<<<< HEAD
 // HeartSync Professional Color Scheme (matching Python version exactly)
 namespace HeartSyncColors
 {
@@ -37,72 +38,116 @@ class HeartSyncEditor : public juce::AudioProcessorEditor, private juce::Timer
 public:
     explicit HeartSyncEditor(HeartSyncProcessor&);
     ~HeartSyncEditor() override;
-
-    void paint(juce::Graphics&) override;
+=======
+class HeartSyncMetricView : public juce::Component
+{
+public:
+    HeartSyncMetricView(const juce::String& titleText, const juce::String& unitText, juce::Colour accentColour);
+    void setData(float value, const juce::Array<float>& timeHistory, const juce::Array<float>& valueHistory);
+    void paint(juce::Graphics& g) override;
     void resized() override;
 
 private:
-    void timerCallback() override;
-    void wireClientCallbacks();
-    void scanForDevices();
-    void connectToDevice(const juce::String& deviceAddress);
-    
-    // Build control functions for each row
-    void buildHROffsetControls(juce::Component& host);
-    void buildSmoothControls(juce::Component& host);
-    void buildWetDryControls(juce::Component& host);
-    void updateSmoothMetrics();
-
-    HeartSyncProcessor& processorRef;
-    HSLookAndFeel lnf;
-
-    // Three stacked metric rows
-    std::unique_ptr<MetricRow> rowHR;
-    std::unique_ptr<MetricRow> rowSmooth;
-    std::unique_ptr<MetricRow> rowWetDry;
-
-    // Parameter controls (owned by control build functions)
-    std::unique_ptr<ParamBox> hrOffsetBox;
-    std::unique_ptr<ParamBox> smoothBox;
-    std::unique_ptr<ParamBox> wetDryBox;
-    juce::Label smoothMetricsLabel; // α=..., T½=...s, ≈... samples
-    std::unique_ptr<ParamToggle> wetDrySourceToggle; // SMOOTHED HR / RAW HR toggle
-
-    // BLE controls in a panel
-    juce::TextButton scanBtn{"SCAN"}, connectBtn{"CONNECT"},
-                     lockBtn{"LOCK"}, disconnectBtn{"DISCONNECT"};
-    juce::ComboBox deviceBox;
-    juce::Label statusDot, statusLabel;
-    juce::Label bleTitle;
-
-    // Device terminal row
-    juce::Label terminalTitle;
-    juce::Label terminalLabel;
-
-    // Header labels (Python parity)
-    juce::Label headerTitleLeft;      // ❖ HEART SYNC SYSTEM
-    juce::Label headerSubtitleLeft;   // Adaptive Audio Bio Technology
-    juce::Label headerClockRight;     // YYYY-MM-DD HH:MM:SS
-    juce::Label headerStatusRight;    // ◆ SYSTEM OPERATIONAL
-
-    // State variables (matching Python)
-    float currentHR = 0.0f;
-    float smoothedHR = 0.0f;
-    float smoothing = 0.1f;
-    int hrOffset = 0;
-    int wetDryOffset = 0;
-    bool useSmoothedForWetDry = true;
-    bool deviceLocked = false;
-
-#ifdef HEARTSYNC_USE_BRIDGE
-    juce::String currentPermissionState{"unknown"};
-#if JUCE_DEBUG
-    juce::TextButton debugButton;
-    int debugStep{0};
-#endif
-#endif
-
-    bool isInitialized = false;
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(HeartSyncEditor)
+    juce::String title;
+    juce::String unit;
+    juce::Colour accent;
+    float currentValue = 0.0f;
+    juce::Array<float> times;
+    juce::Array<float> values;
+    juce::Label valueLabel;
 };
+
+class HeartSyncVST3AudioProcessorEditor : public juce::AudioProcessorEditor,
+                                          private juce::Timer,
+                                          private juce::Button::Listener,
+                                          private juce::ComboBox::Listener
+{
+public:
+    #pragma once
+
+    #include <juce_audio_processors/juce_audio_processors.h>
+    #include "PluginProcessor.h"
+
+    class HeartSyncMetricView : public juce::Component
+    {
+    public:
+        HeartSyncMetricView(const juce::String& titleText, const juce::String& unitText, juce::Colour accentColour);
+        void setData(float value, const juce::Array<float>& timeHistory, const juce::Array<float>& valueHistory);
+        void paint(juce::Graphics& g) override;
+        void resized() override;
+
+    private:
+        juce::String title;
+        juce::String unit;
+        juce::Colour accent;
+        float currentValue = 0.0f;
+        juce::Array<float> times;
+        juce::Array<float> values;
+        juce::Label valueLabel;
+    };
+
+    class HeartSyncVST3AudioProcessorEditor : public juce::AudioProcessorEditor,
+                                              private juce::Timer,
+                                              private juce::Button::Listener,
+                                              private juce::ComboBox::Listener
+    {
+    public:
+        explicit HeartSyncVST3AudioProcessorEditor(HeartSyncVST3AudioProcessor&);
+        ~HeartSyncVST3AudioProcessorEditor() override;
+
+        void paint(juce::Graphics& g) override;
+        void resized() override;
+
+    private:
+        void timerCallback() override;
+        void buttonClicked(juce::Button* button) override;
+        void comboBoxChanged(juce::ComboBox* comboBox) override;
+
+        void layoutPanels();
+        void refreshTelemetry();
+        void refreshDeviceList(bool force = false);
+        void updateLockState();
+
+        HeartSyncVST3AudioProcessor& processor;
+
+        juce::Label titleLabel;
+        juce::Label subtitleLabel;
+        juce::Label timeLabel;
+        juce::Label systemStatusLabel;
+
+        juce::ComboBox deviceCombo;
+        juce::TextButton scanButton{"SCAN"};
+        juce::TextButton connectButton{"CONNECT"};
+        juce::TextButton disconnectButton{"DISCONNECT"};
+        juce::TextButton lockButton{"LOCKED"};
+
+        juce::Label deviceInfoLabel;
+        juce::Label packetInfoLabel;
+        juce::Label latencyInfoLabel;
+
+        HeartSyncMetricView heartRateView;
+        HeartSyncMetricView smoothedView;
+        HeartSyncMetricView wetDryView;
+
+        juce::Slider hrOffsetSlider;
+        juce::Slider smoothingSlider;
+        juce::Slider wetDryOffsetSlider;
+        juce::ComboBox wetDrySourceCombo;
+
+        juce::Label smoothingMetricsLabel;
+
+        juce::TextEditor consoleView;
+
+        std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> hrOffsetAttachment;
+        std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> smoothingAttachment;
+        std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> wetDryAttachment;
+        std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> wetDrySourceAttachment;
+        std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> lockAttachment;
+
+        HeartSyncVST3AudioProcessor::TelemetrySnapshot snapshot;
+        juce::StringArray lastConsole;
+        juce::StringArray deviceIds;
+        bool devicesDirty = true;
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(HeartSyncVST3AudioProcessorEditor)
+    };
+    juce::Label titleLabel;

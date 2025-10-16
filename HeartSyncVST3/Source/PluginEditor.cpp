@@ -1,285 +1,435 @@
 #include "PluginEditor.h"
+#include "PluginProcessor.h"
+#include "Core/HeartRateParams.h"
 
-HeartSyncEditor::HeartSyncEditor(HeartSyncProcessor& p)
-    : AudioProcessorEditor(&p), processorRef(p)
+#include <algorithm>
+
+HeartSyncMetricView::HeartSyncMetricView(const juce::String& titleText,
+                                         const juce::String& unitText,
+                                         juce::Colour accentColour)
+    : title(titleText), unit(unitText), accent(accentColour)
 {
-    setSize(1180, 740);
-    setLookAndFeel(&lnf);
-
-    // Create three stacked metric rows
-    rowHR = std::make_unique<MetricRow>("HEART RATE", "BPM", HSTheme::VITAL_HEART_RATE,
-        [this](juce::Component& host) { buildHROffsetControls(host); });
-    addAndMakeVisible(*rowHR);
-    rowHR->getGraph().setLineColour(HSTheme::VITAL_HEART_RATE);
-
-    rowSmooth = std::make_unique<MetricRow>("SMOOTHED HR", "BPM", HSTheme::VITAL_SMOOTHED,
-        [this](juce::Component& host) { buildSmoothControls(host); });
-    addAndMakeVisible(*rowSmooth);
-    rowSmooth->getGraph().setLineColour(HSTheme::VITAL_SMOOTHED);
-
-    rowWetDry = std::make_unique<MetricRow>("WET/DRY RATIO", "", HSTheme::VITAL_WET_DRY,
-        [this](juce::Component& host) { buildWetDryControls(host); });
-    addAndMakeVisible(*rowWetDry);
-    rowWetDry->getGraph().setLineColour(HSTheme::VITAL_WET_DRY);
-
-    // Header (left title/subtitle, right clock/status) to mirror Python
-    // Simplify header title to avoid special glyph rendering issues in some hosts
-    headerTitleLeft.setText("HEART SYNC SYSTEM", juce::dontSendNotification);
-    headerTitleLeft.setFont(juce::Font(20.0f, juce::Font::bold));
-    headerTitleLeft.setColour(juce::Label::textColourId, HSTheme::ACCENT_TEAL);
-    addAndMakeVisible(headerTitleLeft);
-
-    headerSubtitleLeft.setText("Adaptive Audio Bio Technology", juce::dontSendNotification);
-    headerSubtitleLeft.setFont(juce::Font(11.0f));
-    headerSubtitleLeft.setColour(juce::Label::textColourId, HSTheme::TEXT_SECONDARY);
-    addAndMakeVisible(headerSubtitleLeft);
-
-    headerClockRight.setText("", juce::dontSendNotification);
-    headerClockRight.setFont(HSTheme::mono(14.0f, true));
-    headerClockRight.setColour(juce::Label::textColourId, HSTheme::TEXT_PRIMARY);
-    headerClockRight.setJustificationType(juce::Justification::centredRight);
-    addAndMakeVisible(headerClockRight);
-
-    headerStatusRight.setText(juce::CharPointer_UTF8("◆ SYSTEM OPERATIONAL"), juce::dontSendNotification);
-    headerStatusRight.setFont(juce::Font(11.0f, juce::Font::bold));
-    headerStatusRight.setColour(juce::Label::textColourId, HSTheme::STATUS_CONNECTED);
-    headerStatusRight.setJustificationType(juce::Justification::centredRight);
-    addAndMakeVisible(headerStatusRight);
-
-    // BLE setup
-    bleTitle.setText("BLUETOOTH LE CONNECTIVITY", juce::dontSendNotification);
-    bleTitle.setFont(HSTheme::label());
-    bleTitle.setColour(juce::Label::textColourId, HSTheme::ACCENT_TEAL);
-    addAndMakeVisible(bleTitle);
-
-    scanBtn.onClick = [this] { scanForDevices(); };
-    addAndMakeVisible(scanBtn);
-
-    connectBtn.onClick = [this] {
-        if (deviceBox.getSelectedItemIndex() >= 0)
-            connectToDevice(deviceBox.getText());
-    };
-    addAndMakeVisible(connectBtn);
-
-    lockBtn.onClick = [this] {
-        deviceLocked = !deviceLocked;
-        lockBtn.setButtonText(deviceLocked ? "UNLOCK" : "LOCK");
-    };
-    addAndMakeVisible(lockBtn);
-
-    disconnectBtn.onClick = [this] { processorRef.disconnectDevice(); };
-    addAndMakeVisible(disconnectBtn);
-
-    deviceBox.setTextWhenNoChoicesAvailable("No devices found");
-    deviceBox.setTextWhenNothingSelected("Select device...");
-    addAndMakeVisible(deviceBox);
-
-    statusDot.setText(juce::CharPointer_UTF8("●"), juce::dontSendNotification);
-    statusDot.setFont(juce::Font(18.0f));
-    statusDot.setColour(juce::Label::textColourId, HSTheme::STATUS_DISCONNECTED);
-    addAndMakeVisible(statusDot);
-
-    statusLabel.setText("DISCONNECTED", juce::dontSendNotification);
-    statusLabel.setFont(HSTheme::mono(12.0f, true));
-    statusLabel.setColour(juce::Label::textColourId, HSTheme::TEXT_SECONDARY);
-    addAndMakeVisible(statusLabel);
-
-    terminalTitle.setText("DEVICE STATUS MONITOR", juce::dontSendNotification);
-    terminalTitle.setFont(HSTheme::label());
-    terminalTitle.setColour(juce::Label::textColourId, HSTheme::ACCENT_TEAL);
-    addAndMakeVisible(terminalTitle);
-
-    terminalLabel.setText("[ WAITING ]", juce::dontSendNotification);
-    terminalLabel.setFont(HSTheme::mono(10.0f, false));
-    terminalLabel.setColour(juce::Label::textColourId, HSTheme::TEXT_SECONDARY);
-    addAndMakeVisible(terminalLabel);
-
-    wireClientCallbacks();
-    startTimer(100);
-    isInitialized = true;
+    valueLabel.setJustificationType(juce::Justification::centredLeft);
+    valueLabel.setColour(juce::Label::textColourId, accent); 
+    valueLabel.setFont(juce::Font(32.0f, juce::Font::bold));
+    addAndMakeVisible(valueLabel);
 }
 
-HeartSyncEditor::~HeartSyncEditor()
+void HeartSyncMetricView::setData(float value,
+                                  const juce::Array<float>& timeHistory,
+                                  const juce::Array<float>& valueHistory)
 {
-    setLookAndFeel(nullptr);
-}
+    currentValue = value;
+    times = timeHistory;
+    values = valueHistory;
 
-void HeartSyncEditor::buildHROffsetControls(juce::Component& host)
-{
-    hrOffsetBox = std::make_unique<ParamBox>("HR OFFSET", HSTheme::VITAL_HEART_RATE, 
-                                             "BPM", -100.0f, 100.0f, 1.0f);
-    hrOffsetBox->setValue(0.0f);
-    hrOffsetBox->onChange = [this](float v) { hrOffset = (int)v; };
-    host.addAndMakeVisible(*hrOffsetBox);
-    hrOffsetBox->setBounds(HSTheme::grid, HSTheme::grid, 120, 72);
-}
-
-void HeartSyncEditor::buildSmoothControls(juce::Component& host)
-{
-    smoothBox = std::make_unique<ParamBox>("SMOOTH", HSTheme::VITAL_SMOOTHED, 
-                                           "x", 0.1f, 10.0f, 0.1f);
-    smoothBox->setValue(0.1f);
-    smoothBox->onChange = [this](float v) { smoothing = v; updateSmoothMetrics(); };
-    host.addAndMakeVisible(*smoothBox);
-    smoothBox->setBounds(HSTheme::grid, HSTheme::grid, 120, 72);
-
-    smoothMetricsLabel.setFont(HSTheme::mono(9.0f, false));
-    smoothMetricsLabel.setColour(juce::Label::textColourId, HSTheme::TEXT_SECONDARY);
-    smoothMetricsLabel.setJustificationType(juce::Justification::topLeft);
-    host.addAndMakeVisible(smoothMetricsLabel);
-    smoothMetricsLabel.setBounds(HSTheme::grid, 88, 180, 60);
-    updateSmoothMetrics();
-}
-
-void HeartSyncEditor::buildWetDryControls(juce::Component& host)
-{
-    wetDrySourceToggle = std::make_unique<ParamToggle>("SMOOTHED HR", "RAW HR");
-    wetDrySourceToggle->setColours(juce::Colour(0xff004d44), HSTheme::VITAL_SMOOTHED,
-                                   juce::Colour(0xff3a0000), HSTheme::VITAL_HEART_RATE,
-                                   HSTheme::ACCENT_TEAL);
-    wetDrySourceToggle->setState(true);
-    wetDrySourceToggle->onChange = [this](bool on) { useSmoothedForWetDry = on; };
-    host.addAndMakeVisible(*wetDrySourceToggle);
-    wetDrySourceToggle->setBounds(HSTheme::grid, HSTheme::grid, 120, 48);
-
-    wetDryBox = std::make_unique<ParamBox>("WET/DRY", HSTheme::VITAL_WET_DRY, 
-                                           "%", -100.0f, 100.0f, 1.0f);
-    wetDryBox->setValue(0.0f);
-    wetDryBox->onChange = [this](float v) { wetDryOffset = (int)v; };
-    host.addAndMakeVisible(*wetDryBox);
-    wetDryBox->setBounds(HSTheme::grid, 52, 120, 72);
-}
-
-void HeartSyncEditor::updateSmoothMetrics()
-{
-    const float alpha = 1.0f / (1.0f + smoothing);
-    const float halfLifeSamples = std::log(0.5f) / std::log(1.0f - alpha);
-    const float halfLifeSeconds = halfLifeSamples * 0.025f;
-    const int effectiveWindow = (int)std::round(halfLifeSamples * 5.0f);
-    juce::String metrics = juce::String::formatted("α=%.3f\nT½=%.2fs\n≈%d samples",
-                                                   alpha, halfLifeSeconds, effectiveWindow);
-    smoothMetricsLabel.setText(metrics, juce::dontSendNotification);
-}
-
-void HeartSyncEditor::paint(juce::Graphics& g)
-{
-    g.fillAll(HSTheme::SURFACE_BASE_START);
-    auto r = getLocalBounds().toFloat();
-
-    // Header
-    auto header = r.removeFromTop((float)HSTheme::headerH);
-    g.setColour(HSTheme::SURFACE_PANEL_LIGHT);
-    g.fillRect(header);
-    // left/right header controls are Components; draw a tiny verification tag at far left
-    g.setColour(HSTheme::ACCENT_TEAL_DARK);
-    g.setFont(juce::Font(10.0f));
-    g.drawText("3x3 STACK ACTIVE", header.removeFromLeft(140.0f).reduced(8, 4), juce::Justification::centredLeft);
-
-    // Section headings
-    auto sectionRow = r.removeFromTop(40.0f);
-    auto col = sectionRow.removeFromLeft(200.0f);
-    g.setColour(HSTheme::ACCENT_TEAL);
-    g.setFont(HSTheme::label());
-    g.drawText("VALUES", col, juce::Justification::centredLeft);
-    g.setColour(HSTheme::ACCENT_TEAL_DARK);
-    g.fillRect(col.removeFromBottom(2.0f));
-
-    col = sectionRow.removeFromLeft(200.0f);
-    g.setColour(HSTheme::ACCENT_TEAL);
-    g.drawText("CONTROLS", col, juce::Justification::centredLeft);
-    g.setColour(HSTheme::ACCENT_TEAL_DARK);
-    g.fillRect(col.removeFromBottom(2.0f));
-
-    g.setColour(HSTheme::ACCENT_TEAL);
-    g.drawText("WAVEFORM", sectionRow, juce::Justification::centredLeft);
-    g.setColour(HSTheme::ACCENT_TEAL_DARK);
-    g.fillRect(sectionRow.removeFromBottom(2.0f));
-}
-
-void HeartSyncEditor::resized()
-{
-    auto r = getLocalBounds();
-    // Header layout
-    auto header = r.removeFromTop(HSTheme::headerH);
-    auto left = header.removeFromLeft(header.proportionOfWidth(0.6f)).reduced(HSTheme::grid);
-    auto right = header.reduced(HSTheme::grid);
-    auto t = left.removeFromTop(36);
-    headerTitleLeft.setBounds(t);
-    headerSubtitleLeft.setBounds(left.removeFromTop(20));
-    headerClockRight.setBounds(right.removeFromTop(28));
-    headerStatusRight.setBounds(right.removeFromTop(20));
-
-    // Section headings row under header
-    r.removeFromTop(40);
-
-    // Reserve bottom areas first to ensure rows always have equal space above
-    const int bleBarHeight = 96;
-    const int terminalHeight = 72;
-    auto terminal = r.removeFromBottom(terminalHeight).reduced(HSTheme::grid);
-    auto bleBar   = r.removeFromBottom(bleBarHeight).reduced(HSTheme::grid);
-
-    // Now r contains only the area for the 3 stacked metric rows
-    const int minRowH = 110;
-    int rowHeight = juce::jmax(minRowH, r.getHeight() / 3);
-    // If rounding leaves a few pixels, give them to the last row
-    int leftover = r.getHeight() - (rowHeight * 3);
-
-    auto row1 = r.removeFromTop(rowHeight);
-    auto row2 = r.removeFromTop(rowHeight);
-    auto row3 = r; // whatever remains
-    if (leftover > 0)
-        row3 = row3.withHeight(row3.getHeight() + leftover);
-
-    rowHR->setBounds(row1);
-    rowSmooth->setBounds(row2);
-    rowWetDry->setBounds(row3);
-
-    // BLE bar content (match Python: SCAN | CONNECT | LOCK | DISCONNECT | device dropdown on right)
-    bleTitle.setBounds(bleBar.removeFromTop(24));
-    auto bleControls = bleBar.removeFromTop(40);
-    scanBtn.setBounds(bleControls.removeFromLeft(90).reduced(4));
-    bleControls.removeFromLeft(HSTheme::grid);
-    connectBtn.setBounds(bleControls.removeFromLeft(110).reduced(4));
-    bleControls.removeFromLeft(HSTheme::grid);
-    lockBtn.setBounds(bleControls.removeFromLeft(90).reduced(4));
-    bleControls.removeFromLeft(HSTheme::grid);
-    disconnectBtn.setBounds(bleControls.removeFromLeft(130).reduced(4));
-    bleControls.removeFromLeft(HSTheme::grid);
-    // Device dropdown anchored to the remaining right side
-    deviceBox.setBounds(bleControls);
-
-    auto bleStatus = bleBar.removeFromTop(24);
-    statusDot.setBounds(bleStatus.removeFromLeft(24));
-    statusLabel.setBounds(bleStatus.removeFromLeft(240));
-
-    // Terminal panel under BLE
-    terminalTitle.setBounds(terminal.removeFromTop(20));
-    terminalLabel.setFont(HSTheme::mono(10.0f, true));
-    terminalLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xff001a1a));
-    terminalLabel.setColour(juce::Label::textColourId, HSTheme::ACCENT_TEAL);
-    terminalLabel.setJustificationType(juce::Justification::centredLeft);
-    terminalLabel.setBounds(terminal);
-}
-
-void HeartSyncEditor::timerCallback()
-{
-    headerClockRight.setText(juce::Time::getCurrentTime().toString(true, true), juce::dontSendNotification);
-    auto bioData = processorRef.getCurrentBiometricData();
-    if (bioData.isDataValid)
+    juce::String valueText;
+    if (valueHistory.isEmpty())
     {
-        rowHR->setValueText(juce::String(juce::roundToInt(bioData.rawHeartRate)));
-        rowSmooth->setValueText(juce::String(juce::roundToInt(bioData.smoothedHeartRate)));
-        rowWetDry->setValueText(juce::String(juce::roundToInt(bioData.wetDryRatio)));
-        rowHR->getGraph().push(bioData.rawHeartRate);
-        rowSmooth->getGraph().push(bioData.smoothedHeartRate);
-        rowWetDry->getGraph().push(bioData.wetDryRatio);
+        valueText = "--";
     }
+    else
+    {
+        valueText = juce::String(value, unit.isNotEmpty() ? 1 : 0);
+        if (unit.isNotEmpty())
+            valueText << " " << unit;
+    }
+    valueLabel.setText(valueText, juce::dontSendNotification);
     repaint();
 }
 
-void HeartSyncEditor::wireClientCallbacks() {}
-void HeartSyncEditor::scanForDevices() { processorRef.startDeviceScan(); }
-void HeartSyncEditor::connectToDevice(const juce::String& deviceAddress) 
-{ 
-    processorRef.connectToDevice(deviceAddress.toStdString());
+void HeartSyncMetricView::paint(juce::Graphics& g)
+{
+    auto bounds = getLocalBounds().toFloat();
+    auto header = bounds.removeFromTop(28.0f);
+
+    g.setColour(juce::Colour(0xFF001b1f));
+    g.fillRoundedRectangle(header.expanded(0, 4.0f), 6.0f);
+    g.setColour(accent);
+    g.setFont(juce::Font(15.0f, juce::Font::bold));
+    g.drawText(title, header.toNearestInt(), juce::Justification::centredLeft, true);
+
+    auto waveformArea = bounds.reduced(6.0f);
+    g.setColour(juce::Colour(0xFF001014));
+    g.fillRoundedRectangle(waveformArea, 8.0f);
+    g.setColour(accent.withAlpha(0.35f));
+    g.drawRoundedRectangle(waveformArea, 8.0f, 1.5f);
+
+    if (values.isEmpty() || times.isEmpty())
+        return;
+
+    float minValue = values.getFirst();
+    float maxValue = values.getFirst();
+    for (auto v : values)
+    {
+        minValue = juce::jmin(minValue, v);
+        maxValue = juce::jmax(maxValue, v);
+    }
+    if (juce::approximatelyEqual(minValue, maxValue))
+    {
+        minValue -= 1.0f;
+        maxValue += 1.0f;
+    }
+
+    float minTime = times.getFirst();
+    float maxTime = times.getLast();
+    if (juce::approximatelyEqual(minTime, maxTime))
+        maxTime += 1.0f;
+
+    juce::Path waveform;
+    for (int i = 0; i < values.size(); ++i)
+    {
+        const float normT = juce::jmap(times.getUnchecked(i), minTime, maxTime, 0.0f, 1.0f);
+        const float normV = juce::jmap(values.getUnchecked(i), maxValue, minValue, 0.0f, 1.0f);
+        const float x = waveformArea.getX() + normT * waveformArea.getWidth();
+        const float y = waveformArea.getY() + normV * waveformArea.getHeight();
+        if (i == 0)
+            waveform.startNewSubPath(x, y);
+        else
+            waveform.lineTo(x, y);
+    }
+
+    g.setColour(accent.withAlpha(0.85f));
+    g.strokePath(waveform, juce::PathStrokeType(2.0f, juce::PathStrokeType::beveled, juce::PathStrokeType::rounded));
+}
+
+void HeartSyncMetricView::resized()
+{
+    auto bounds = getLocalBounds();
+    auto header = bounds.removeFromTop(28);
+    valueLabel.setBounds(header.removeFromRight(header.getWidth() / 2));
+}
+
+HeartSyncVST3AudioProcessorEditor::HeartSyncVST3AudioProcessorEditor(HeartSyncVST3AudioProcessor& p)
+    : AudioProcessorEditor(&p),
+      processor(p),
+      heartRateView("HEART RATE", "BPM", juce::Colour(0xFF00ffd5)),
+      smoothedView("SMOOTHED HR", "BPM", juce::Colour(0xFF5bc0ff)),
+      wetDryView("WET/DRY RATIO", "%", juce::Colour(0xFFffb347))
+{
+    setSize(1200, 860);
+
+    addAndMakeVisible(titleLabel);
+    titleLabel.setJustificationType(juce::Justification::centredLeft);
+    titleLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF00eaff));
+    titleLabel.setFont(juce::Font("Rajdhani", 30.0f, juce::Font::bold));
+    titleLabel.setText("❖ HEARTSYNC PROFESSIONAL", juce::dontSendNotification);
+
+    addAndMakeVisible(subtitleLabel);
+    subtitleLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF6fdcff));
+    subtitleLabel.setFont(juce::Font(16.0f));
+    subtitleLabel.setText("Adaptive Audio Bio Technology", juce::dontSendNotification);
+
+    addAndMakeVisible(timeLabel);
+    timeLabel.setFont(juce::Font(16.0f, juce::Font::bold));
+    timeLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFcaffff));
+
+    addAndMakeVisible(systemStatusLabel);
+    systemStatusLabel.setFont(juce::Font(14.0f, juce::Font::bold));
+    systemStatusLabel.setColour(juce::Label::textColourId, juce::Colours::lime);
+
+    addAndMakeVisible(deviceCombo);
+    deviceCombo.setTextWhenNoChoicesAvailable("No devices yet");
+    deviceCombo.setTextWhenNothingSelected("Select a device");
+    deviceCombo.addListener(this);
+
+    addAndMakeVisible(scanButton);
+    addAndMakeVisible(connectButton);
+    addAndMakeVisible(disconnectButton);
+    addAndMakeVisible(lockButton);
+
+    connectButton.addListener(this);
+    disconnectButton.addListener(this);
+    scanButton.addListener(this);
+    lockButton.addListener(this);
+    lockButton.setClickingTogglesState(true);
+
+    connectButton.setEnabled(false);
+    disconnectButton.setEnabled(false);
+
+    addAndMakeVisible(deviceInfoLabel);
+    deviceInfoLabel.setFont(juce::Font(14.0f));
+    deviceInfoLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+
+    addAndMakeVisible(packetInfoLabel);
+    packetInfoLabel.setFont(juce::Font(13.0f));
+    packetInfoLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF00ffc6));
+
+    addAndMakeVisible(latencyInfoLabel);
+    latencyInfoLabel.setFont(juce::Font(13.0f));
+    latencyInfoLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFffc371));
+
+    addAndMakeVisible(heartRateView);
+    addAndMakeVisible(smoothedView);
+    addAndMakeVisible(wetDryView);
+
+    auto configureSlider = [](juce::Slider& slider, juce::Colour colour)
+    {
+        slider.setSliderStyle(juce::Slider::LinearVertical);
+        slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 70, 20);
+        slider.setColour(juce::Slider::thumbColourId, colour);
+        slider.setColour(juce::Slider::trackColourId, colour.withAlpha(0.6f));
+    };
+
+    configureSlider(hrOffsetSlider, juce::Colour(0xFF00ffaa));
+    addAndMakeVisible(hrOffsetSlider);
+    hrOffsetSlider.setName("HR Offset");
+
+    configureSlider(smoothingSlider, juce::Colour(0xFF5ac9ff));
+    smoothingSlider.setSkewFactor(0.4f);
+    addAndMakeVisible(smoothingSlider);
+    smoothingSlider.setName("Smoothing");
+
+    configureSlider(wetDryOffsetSlider, juce::Colour(0xFFffb347));
+    addAndMakeVisible(wetDryOffsetSlider);
+    wetDryOffsetSlider.setName("Wet/Dry Offset");
+
+    wetDrySourceCombo.addItem("Smoothed HR", 1);
+    wetDrySourceCombo.addItem("Raw HR", 2);
+    addAndMakeVisible(wetDrySourceCombo);
+
+    addAndMakeVisible(smoothingMetricsLabel);
+    smoothingMetricsLabel.setFont(juce::Font(13.0f));
+    smoothingMetricsLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+
+    addAndMakeVisible(consoleView);
+    consoleView.setReadOnly(true);
+    consoleView.setMultiLine(true);
+    consoleView.setScrollbarsShown(true);
+    consoleView.setFont(juce::Font(13.0f, juce::Font::plain));
+    consoleView.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xFF00010a));
+    consoleView.setColour(juce::TextEditor::textColourId, juce::Colour(0xFF00fff6));
+
+    auto& vts = processor.getValueTreeState();
+    hrOffsetAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        vts, HeartRateParams::HEART_RATE_OFFSET, hrOffsetSlider);
+    smoothingAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        vts, HeartRateParams::SMOOTHING_FACTOR, smoothingSlider);
+    wetDryAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+        vts, HeartRateParams::WET_DRY_OFFSET, wetDryOffsetSlider);
+    wetDrySourceAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        vts, HeartRateParams::WET_DRY_SOURCE, wetDrySourceCombo);
+    lockAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        vts, HeartRateParams::UI_LOCKED, lockButton);
+
+    startTimerHz(30);
+    refreshDeviceList(true);
+    updateLockState();
+}
+
+HeartSyncVST3AudioProcessorEditor::~HeartSyncVST3AudioProcessorEditor()
+{
+    stopTimer();
+}
+
+void HeartSyncVST3AudioProcessorEditor::paint(juce::Graphics& g)
+{
+    juce::ColourGradient gradient(juce::Colour(0xFF050716), 0, 0,
+                                  juce::Colour(0xFF02131f), 0, static_cast<float>(getHeight()), false);
+    g.setGradientFill(gradient);
+    g.fillAll();
+
+    g.setColour(juce::Colour(0x3300ffff));
+    g.drawRect(getLocalBounds());
+}
+
+void HeartSyncVST3AudioProcessorEditor::resized()
+{
+    layoutPanels();
+}
+
+void HeartSyncVST3AudioProcessorEditor::timerCallback()
+{
+    refreshTelemetry();
+}
+
+void HeartSyncVST3AudioProcessorEditor::buttonClicked(juce::Button* button)
+{
+    if (button == &scanButton)
+    {
+        processor.beginDeviceScan();
+        devicesDirty = true;
+        refreshDeviceList(true);
+    }
+    else if (button == &connectButton)
+    {
+        const int selectedIndex = deviceCombo.getSelectedItemIndex();
+        if (juce::isPositiveAndBelow(selectedIndex, deviceIds.size()))
+        {
+            const bool connected = processor.connectToDevice(deviceIds[selectedIndex].toStdString());
+            disconnectButton.setEnabled(connected);
+            connectButton.setEnabled(!connected && deviceCombo.getSelectedId() > 0);
+            devicesDirty = true;
+        }
+    }
+    else if (button == &disconnectButton)
+    {
+        processor.disconnectFromDevice();
+        disconnectButton.setEnabled(false);
+        connectButton.setEnabled(deviceCombo.getSelectedId() > 0);
+        devicesDirty = true;
+    }
+
+    if (button == &lockButton)
+        updateLockState();
+}
+
+void HeartSyncVST3AudioProcessorEditor::comboBoxChanged(juce::ComboBox* comboBox)
+{
+    if (comboBox == &deviceCombo)
+        connectButton.setEnabled(deviceCombo.getSelectedId() > 0);
+}
+
+void HeartSyncVST3AudioProcessorEditor::layoutPanels()
+{
+    auto bounds = getLocalBounds().reduced(18);
+
+    auto header = bounds.removeFromTop(80);
+    auto leftHeader = header.removeFromLeft(header.getWidth() * 0.6f);
+    titleLabel.setBounds(leftHeader.removeFromTop(40));
+    subtitleLabel.setBounds(leftHeader.removeFromTop(24));
+
+    auto rightHeader = header;
+    timeLabel.setBounds(rightHeader.removeFromTop(28));
+    systemStatusLabel.setBounds(rightHeader.removeFromTop(24));
+
+    auto devicePanel = bounds.removeFromTop(120);
+    devicePanel.reduce(10, 4);
+
+    auto deviceTop = devicePanel.removeFromTop(36);
+    deviceCombo.setBounds(deviceTop.removeFromLeft(devicePanel.getWidth() * 0.5f));
+    lockButton.setBounds(deviceTop.removeFromRight(120));
+
+    auto buttonRow = devicePanel.removeFromTop(32);
+    scanButton.setBounds(buttonRow.removeFromLeft(150));
+    connectButton.setBounds(buttonRow.removeFromLeft(150));
+    disconnectButton.setBounds(buttonRow.removeFromLeft(150));
+
+    deviceInfoLabel.setBounds(devicePanel.removeFromTop(24));
+    packetInfoLabel.setBounds(devicePanel.removeFromTop(20));
+    latencyInfoLabel.setBounds(devicePanel.removeFromTop(20));
+
+    auto metricsArea = bounds.removeFromTop(230);
+    auto metricWidth = metricsArea.getWidth() / 3;
+    heartRateView.setBounds(metricsArea.removeFromLeft(metricWidth).reduced(4));
+    smoothedView.setBounds(metricsArea.removeFromLeft(metricWidth).reduced(4));
+    wetDryView.setBounds(metricsArea.reduced(4));
+
+    auto controlsArea = bounds.removeFromTop(260);
+    auto sliderWidth = 160;
+    hrOffsetSlider.setBounds(controlsArea.removeFromLeft(sliderWidth).reduced(20));
+    smoothingSlider.setBounds(controlsArea.removeFromLeft(sliderWidth).reduced(20));
+    wetDryOffsetSlider.setBounds(controlsArea.removeFromLeft(sliderWidth).reduced(20));
+
+    auto sourceArea = controlsArea.removeFromTop(60);
+    wetDrySourceCombo.setBounds(sourceArea.removeFromLeft(220).reduced(10));
+    smoothingMetricsLabel.setBounds(sourceArea.reduced(10));
+
+    consoleView.setBounds(bounds.reduced(4));
+}
+
+void HeartSyncVST3AudioProcessorEditor::refreshTelemetry()
+{
+    auto newSnapshot = processor.getTelemetrySnapshot();
+    snapshot = newSnapshot;
+
+    timeLabel.setText(juce::Time::getCurrentTime().toString(true, true, true, true), juce::dontSendNotification);
+    const bool connected = snapshot.isConnected;
+    systemStatusLabel.setText(snapshot.statusText, juce::dontSendNotification);
+
+    deviceInfoLabel.setText(snapshot.deviceName.isEmpty() ? "Device: --" : "Device: " + snapshot.deviceName,
+                            juce::dontSendNotification);
+
+    if (snapshot.packetsExpected > 0 || snapshot.packetsReceived > 0)
+    {
+        const float expected = static_cast<float>(std::max(1, snapshot.packetsExpected));
+        const float percent = (static_cast<float>(snapshot.packetsReceived) / expected) * 100.0f;
+        packetInfoLabel.setText(juce::String::formatted("Packets %d / %d (%.1f%%) | Signal %.0f%%",
+                                                       snapshot.packetsReceived,
+                                                       snapshot.packetsExpected,
+                                                       percent,
+                                                       snapshot.signalQuality),
+                                juce::dontSendNotification);
+    }
+    else
+    {
+        packetInfoLabel.setText("Packets --", juce::dontSendNotification);
+    }
+
+    latencyInfoLabel.setText(connected
+                                 ? "Latency " + juce::String(snapshot.lastLatencyMs, 1) + " ms"
+                                 : "Latency --",
+                             juce::dontSendNotification);
+
+    heartRateView.setData(snapshot.heart.rawBpm, snapshot.history.time, snapshot.history.raw);
+    smoothedView.setData(snapshot.heart.smoothedBpm, snapshot.history.time, snapshot.history.smoothed);
+    wetDryView.setData(snapshot.heart.wetDry, snapshot.history.time, snapshot.history.wetDry);
+
+    smoothingMetricsLabel.setText(juce::String::formatted("α=%.3f  T½=%.2fs  window≈%d samples",
+                                                         snapshot.heart.alpha,
+                                                         snapshot.heart.halfLifeSeconds,
+                                                         snapshot.heart.effectiveWindowSamples),
+                                  juce::dontSendNotification);
+
+    if (snapshot.consoleLog != lastConsole)
+    {
+        juce::String joined;
+        for (auto& line : snapshot.consoleLog)
+            joined += line + "\n";
+        consoleView.setText(joined, juce::dontSendNotification);
+        consoleView.moveCaretToEnd();
+        lastConsole = snapshot.consoleLog;
+    }
+
+    connectButton.setEnabled(!connected && deviceCombo.getSelectedId() > 0);
+    disconnectButton.setEnabled(connected);
+    refreshDeviceList();
+    updateLockState();
+}
+
+void HeartSyncVST3AudioProcessorEditor::refreshDeviceList(bool force)
+{
+    if (!devicesDirty && !force)
+        return;
+
+    auto devices = processor.getDiscoveredDevices();
+    deviceCombo.clear(juce::NotificationType::dontSendNotification);
+    deviceIds.clear();
+    int itemId = 1;
+    for (const auto& device : devices)
+    {
+        juce::String label = device.name.empty() ? juce::String("Unknown device") : juce::String(device.name);
+        juce::String idString = device.id.empty() ? juce::String("ID??") : juce::String(device.id);
+        label += "  [" + idString + "]";
+        deviceCombo.addItem(label, itemId);
+        deviceIds.add(idString);
+        ++itemId;
+    }
+
+    connectButton.setEnabled(!snapshot.isConnected && deviceCombo.getSelectedId() > 0);
+    devicesDirty = false;
+}
+
+void HeartSyncVST3AudioProcessorEditor::updateLockState()
+{
+    if (lockButton.getToggleState())
+    {
+        lockButton.setButtonText("LOCKED");
+        lockButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF2a1500));
+        lockButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFffb347));
+        hrOffsetSlider.setEnabled(false);
+        smoothingSlider.setEnabled(false);
+        wetDryOffsetSlider.setEnabled(false);
+        wetDrySourceCombo.setEnabled(false);
+    }
+    else
+    {
+        lockButton.setButtonText("UNLOCKED");
+        lockButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF00331a));
+        lockButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFF7fffd4));
+        hrOffsetSlider.setEnabled(true);
+        smoothingSlider.setEnabled(true);
+        wetDryOffsetSlider.setEnabled(true);
+        wetDrySourceCombo.setEnabled(true);
+    }
 }

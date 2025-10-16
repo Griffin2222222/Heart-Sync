@@ -48,6 +48,7 @@ public:
     std::string getConnectedDeviceName() const { return connectedDeviceName; }
     std::vector<BluetoothDevice> getDiscoveredDevices() const;
     
+<<<<<<< HEAD
     // Heart rate data with history for UI
     float getCurrentHeartRate() const { return currentHeartRate.load(); }
     float getSmoothedHeartRate() const { return smoothedHeartRate.load(); }
@@ -68,8 +69,18 @@ public:
     
     // Console logging for UI
     std::function<void(const std::string&)> onConsoleMessage;
+=======
+    // Heart rate data
+    float getLatestHeartRate() const;
+    using MeasurementCallback = std::function<void(float, const std::vector<float>&)>;
+    void setMeasurementCallback(MeasurementCallback callback);
+    void setConnectionCallbacks(std::function<void(const BluetoothDevice&)> onConnected,
+                                std::function<void()> onDisconnected,
+                                std::function<void(const std::string&)> onError);
+>>>>>>> e2e13cb (Fix JUCE build configuration and parameter handling)
     
 private:
+<<<<<<< HEAD
     // Core Bluetooth objects (macOS)
     CBCentralManager* centralManager;
     CBPeripheral* connectedPeripheral;
@@ -82,6 +93,35 @@ private:
     std::string connectedDeviceName;
     mutable std::mutex devicesMutex;
     std::vector<BluetoothDevice> discoveredDevices;
+=======
+    void scanForDevices();
+#ifdef HEARTSYNC_USE_WINRT
+    void connectToDevice(const winrt::Windows::Devices::Enumeration::DeviceInformation& deviceInfo);
+    void subscribeToHeartRateNotifications(const winrt::Windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristic& characteristic);
+    void processHeartRateData(const winrt::Windows::Storage::Streams::IBuffer& buffer);
+    void updateDeviceList(const winrt::Windows::Devices::Enumeration::DeviceInformation& deviceInfo);
+    void onDeviceRemoved(const winrt::Windows::Devices::Enumeration::DeviceWatcher& watcher, const winrt::Windows::Devices::Enumeration::DeviceInformationUpdate& update);
+#else
+    void startHeartRateSimulation();
+#endif
+
+    std::atomic<float> latestHeartRate { 0.0f };
+    std::thread scanningThread;
+    mutable std::mutex devicesMutex;
+    mutable std::mutex callbackMutex;
+    std::condition_variable condition;
+    std::atomic<bool> isRunning { false };
+    std::atomic<bool> scanning { false };
+    std::atomic<bool> connected { false };
+    
+    MeasurementCallback measurementCallback;
+    std::function<void(const BluetoothDevice&)> onConnectedCallback;
+    std::function<void()> onDisconnectedCallback;
+    std::function<void(const std::string&)> onErrorCallback;
+    std::vector<BluetoothDevice> availableDevices;
+    BluetoothDevice currentDevice;
+    std::string lastError;
+>>>>>>> e2e13cb (Fix JUCE build configuration and parameter handling)
     
     // Heart rate processing
     std::atomic<float> currentHeartRate;
