@@ -32,8 +32,16 @@ struct BluetoothManager::Impl
         @autoreleasepool
         {
             delegate = [[HeartSyncBLEDelegate alloc] initWithImpl:this];
+            if (delegate == nil)
+                throw std::runtime_error("Failed to create Bluetooth delegate");
+            
             centralManager = [[CBCentralManager alloc] initWithDelegate:delegate queue:nil options:nil];
+            if (centralManager == nil)
+                throw std::runtime_error("Failed to create CBCentralManager");
+            
             peripherals = [[NSMutableDictionary alloc] init];
+            if (peripherals == nil)
+                throw std::runtime_error("Failed to create peripherals dictionary");
         }
     }
 
@@ -365,7 +373,20 @@ didDiscoverCharacteristicsForService:(CBService*)service
 BluetoothManager::BluetoothManager()
     : scanning(false), connected(false), latestHeartRate(0.0f)
 {
-    impl = std::make_unique<Impl>(*this);
+    try
+    {
+        impl = std::make_unique<Impl>(*this);
+    }
+    catch (const std::exception& e)
+    {
+        DBG("BluetoothManager init failed: " << e.what());
+        impl = nullptr;
+    }
+    catch (...)
+    {
+        DBG("BluetoothManager init failed: unknown error");
+        impl = nullptr;
+    }
 }
 
 BluetoothManager::~BluetoothManager() = default;
