@@ -107,8 +107,8 @@ HeartSyncVST3AudioProcessorEditor::HeartSyncVST3AudioProcessorEditor(HeartSyncVS
       smoothedView("SMOOTHED HR", "BPM", juce::Colour(0xFF5bc0ff)),
       wetDryView("WET/DRY RATIO", "%", juce::Colour(0xFFffb347))
 {
-    setSize(1200, 860);
-
+    // Note: setSize() moved to end of constructor to avoid calling resized() before components are ready
+    
     addAndMakeVisible(titleLabel);
     titleLabel.setJustificationType(juce::Justification::centredLeft);
     titleLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF00eaff));
@@ -211,6 +211,9 @@ HeartSyncVST3AudioProcessorEditor::HeartSyncVST3AudioProcessorEditor(HeartSyncVS
         vts, HeartRateParams::WET_DRY_SOURCE, wetDrySourceCombo);
     lockAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         vts, HeartRateParams::UI_LOCKED, lockButton);
+
+    // Set size LAST to avoid calling resized() before all components are fully initialized
+    setSize(1200, 860);
 
     startTimerHz(30);
     refreshDeviceList(true);
