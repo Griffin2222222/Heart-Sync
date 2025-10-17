@@ -65,8 +65,9 @@ private:
     void addOrUpdateDevice(const BluetoothDevice& device);
 
 #if JUCE_MAC
-    friend struct Impl;
+public:
     struct Impl;
+private:
     std::unique_ptr<Impl> impl;
 #else
     void scanForDevices();
