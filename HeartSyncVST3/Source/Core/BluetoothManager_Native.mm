@@ -361,6 +361,142 @@ didDiscoverCharacteristicsForService:(CBService*)service
 
 @end
 
+// BluetoothManager public method implementations (forward to Impl)
+BluetoothManager::BluetoothManager()
+    : scanning(false), connected(false), latestHeartRate(0.0f)
+{
+    impl = std::make_unique<Impl>(*this);
+}
+
+BluetoothManager::~BluetoothManager() = default;
+
+void BluetoothManager::startScanning()
+{
+    if (impl)
+        impl->startScanning();
+}
+
+void BluetoothManager::stopScanning()
+{
+    if (impl)
+        impl->stopScanning();
+}
+
+bool BluetoothManager::connectToDevice(const std::string& deviceId)
+{
+    return impl ? impl->connectToDevice(deviceId) : false;
+}
+
+void BluetoothManager::disconnectCurrentDevice()
+{
+    if (impl)
+        impl->disconnectCurrentDevice();
+}
+
+bool BluetoothManager::isScanning() const
+{
+    return scanning.load();
+}
+
+bool BluetoothManager::isConnected() const
+{
+    return connected.load();
+}
+
+float BluetoothManager::getLatestHeartRate() const
+{
+    return latestHeartRate.load();
+}
+
+std::vector<BluetoothDevice> BluetoothManager::getAvailableDevices() const
+{
+    std::lock_guard<std::mutex> lock(devicesMutex);
+    return availableDevices;
+}
+
+BluetoothDevice BluetoothManager::getCurrentDevice() const
+{
+    std::lock_guard<std::mutex> lock(devicesMutex);
+    return currentDevice;
+}
+
+void BluetoothManager::setMeasurementCallback(MeasurementCallback callback)
+{
+    std::lock_guard<std::mutex> lock(callbackMutex);
+    measurementCallback = std::move(callback);
+}
+
+void BluetoothManager::setConnectionCallbacks(
+    std::function<void(const BluetoothDevice&)> onConnected,
+    std::function<void()> onDisconnected,
+    std::function<void(const std::string&)> onError)
+{
+    std::lock_guard<std::mutex> lock(callbackMutex);
+    onConnectedCallback = std::move(onConnected);
+    onDisconnectedCallback = std::move(onDisconnected);
+    onErrorCallback = std::move(onError);
+}
+
+std::string BluetoothManager::getLastError() const
+{
+    std::lock_guard<std::mutex> lock(devicesMutex);
+    return lastError;
+}
+
+void BluetoothManager::dispatchMeasurement(float bpm, const std::vector<float>& rrIntervals)
+{
+    latestHeartRate.store(bpm);
+    std::lock_guard<std::mutex> lock(callbackMutex);
+    if (measurementCallback)
+        measurementCallback(bpm, rrIntervals);
+}
+
+void BluetoothManager::dispatchConnected(const BluetoothDevice& device)
+{
+    connected.store(true);
+    {
+        std::lock_guard<std::mutex> lock(devicesMutex);
+        currentDevice = device;
+    }
+    std::lock_guard<std::mutex> lockCb(callbackMutex);
+    if (onConnectedCallback)
+        onConnectedCallback(device);
+}
+
+void BluetoothManager::dispatchDisconnected()
+{
+    connected.store(false);
+    {
+        std::lock_guard<std::mutex> lock(devicesMutex);
+        currentDevice = BluetoothDevice();
+    }
+    std::lock_guard<std::mutex> lockCb(callbackMutex);
+    if (onDisconnectedCallback)
+        onDisconnectedCallback();
+}
+
+void BluetoothManager::dispatchError(const std::string& message)
+{
+    {
+        std::lock_guard<std::mutex> lock(devicesMutex);
+        lastError = message;
+    }
+    std::lock_guard<std::mutex> lockCb(callbackMutex);
+    if (onErrorCallback)
+        onErrorCallback(message);
+}
+
+void BluetoothManager::addOrUpdateDevice(const BluetoothDevice& device)
+{
+    std::lock_guard<std::mutex> lock(devicesMutex);
+    auto it = std::find_if(availableDevices.begin(), availableDevices.end(),
+                           [&](const BluetoothDevice& d) { return d.identifier == device.identifier; });
+    if (it != availableDevices.end())
+        *it = device;
+    else
+        availableDevices.push_back(device);
+}
+
 #else
 
 void bluetoothManagerNativeFileIsUnused() {}
