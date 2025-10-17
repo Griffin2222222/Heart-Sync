@@ -99,6 +99,12 @@ if(WIN32)
         )
         message(STATUS "Linking standard Windows libraries for MinGW")
     endif()
+elseif(APPLE)
+    target_link_libraries(HeartSyncVST3 PRIVATE 
+        "-framework CoreBluetooth"
+        "-framework Foundation"
+    )
+    message(STATUS "Linking CoreBluetooth and Foundation frameworks")
 endif()
 
 # Preprocessor definitions
