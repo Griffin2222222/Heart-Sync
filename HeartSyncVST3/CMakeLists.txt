@@ -52,7 +52,6 @@ target_sources(HeartSyncVST3 PRIVATE
     Source/PluginProcessor.h
     Source/PluginEditor.cpp
     Source/PluginEditor.h
-    Source/Core/BluetoothManager.cpp
     Source/Core/BluetoothManager.h
     Source/Core/HeartRateProcessor.cpp
     Source/Core/HeartRateProcessor.h
@@ -62,6 +61,9 @@ target_sources(HeartSyncVST3 PRIVATE
 if(APPLE)
     target_sources(HeartSyncVST3 PRIVATE
         Source/Core/BluetoothManager_Native.mm)
+else()
+    target_sources(HeartSyncVST3 PRIVATE
+        Source/Core/BluetoothManager.cpp)
 endif()
 
 # Link JUCE modules to the plugin target
