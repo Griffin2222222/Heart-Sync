@@ -19,12 +19,14 @@ HeartSyncVST3AudioProcessor::HeartSyncVST3AudioProcessor()
                          .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       parameters(*this, nullptr, "HeartSyncParameters", createParameterLayout())
 {
-    heartRateProcessor.attachToValueTree(parameters);
-    handleParameterChanges();
+    try
+    {
+        heartRateProcessor.attachToValueTree(parameters);
+        handleParameterChanges();
 
-    parameters.state.setProperty(HeartRateParams::OSC_HOST, "127.0.0.1", nullptr);
+        parameters.state.setProperty(HeartRateParams::OSC_HOST, "127.0.0.1", nullptr);
 
-    bluetoothManager.setMeasurementCallback([this](float bpm, const std::vector<float>& rrIntervals)
+        bluetoothManager.setMeasurementCallback([this](float bpm, const std::vector<float>& rrIntervals)
     {
         heartRateProcessor.pushNewMeasurement(bpm, rrIntervals);
 
@@ -68,16 +70,33 @@ HeartSyncVST3AudioProcessor::HeartSyncVST3AudioProcessor()
             appendConsoleLog("Bluetooth error: " + juce::String(error), "ERR");
         });
 
-    startTimerHz(oscTicksPerSecond);
-    appendConsoleLog("HeartSync processor initialised", "INIT");
+        startTimerHz(oscTicksPerSecond);
+        appendConsoleLog("HeartSync processor initialised", "INIT");
+    }
+    catch (const std::exception& e)
+    {
+        DBG("HeartSync init error: " << e.what());
+        // Continue anyway - plugin should load even if Bluetooth fails
+    }
+    catch (...)
+    {
+        DBG("HeartSync init error: unknown exception");
+    }
 }
 
 HeartSyncVST3AudioProcessor::~HeartSyncVST3AudioProcessor()
 {
-    stopTimer();
-    bluetoothManager.stopScanning();
-    bluetoothManager.disconnectCurrentDevice();
-    oscSenderManager.stopSending();
+    try
+    {
+        stopTimer();
+        bluetoothManager.stopScanning();
+        bluetoothManager.disconnectCurrentDevice();
+        oscSenderManager.stopSending();
+    }
+    catch (...)
+    {
+        // Ignore exceptions in destructor
+    }
 }
 
 const juce::String HeartSyncVST3AudioProcessor::getName() const
