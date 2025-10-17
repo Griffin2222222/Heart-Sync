@@ -31,11 +31,11 @@ FetchContent_MakeAvailable(JUCE)
 
 # Create the plugin target
 juce_add_plugin(HeartSyncVST3
-    COMPANY_NAME "HeartSyncAudio"
-    BUNDLE_ID "com.heartsyncaudio.heartsyncvst3"
-    PLUGIN_MANUFACTURER_CODE HSAu
+    COMPANY_NAME "Conscious Audio"
+    BUNDLE_ID "com.consciousaudio.heartsyncvst3"
+    PLUGIN_MANUFACTURER_CODE CSAu
     PLUGIN_CODE HSM3
-    FORMATS VST3 Standalone
+    FORMATS VST3 AU Standalone
     PRODUCT_NAME "HeartSync Modulator"
     PLUGIN_NAME "HeartSync Modulator"
     DESCRIPTION "Heart rate reactive modulation plugin with Bluetooth LE support"
@@ -58,6 +58,11 @@ target_sources(HeartSyncVST3 PRIVATE
     Source/Core/HeartRateProcessor.h
     Source/Core/OscSenderManager.cpp
     Source/Core/OscSenderManager.h)
+
+if(APPLE)
+    target_sources(HeartSyncVST3 PRIVATE
+        Source/Core/BluetoothManager_Native.mm)
+endif()
 
 # Link JUCE modules to the plugin target
 target_link_libraries(HeartSyncVST3 PRIVATE
