@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.22)
 
 project(HeartSyncVST3 VERSION 1.0.0)
 
+if(APPLE)
+    # Build universal binary so Intel-hosted DAWs can load the plugin via Rosetta
+    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "" FORCE)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -51,6 +56,8 @@ target_sources(HeartSyncVST3 PRIVATE
     Source/PluginProcessor_Professional.h
     Source/PluginEditor.cpp
     Source/PluginEditor.h
+    Source/Core/HeartSyncBLEClient.cpp
+    Source/Core/HeartSyncBLEClient.h
     Source/Core/BluetoothManager.h
     Source/Core/BluetoothManager_Native.mm)
 

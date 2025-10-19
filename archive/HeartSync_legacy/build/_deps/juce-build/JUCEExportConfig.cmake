@@ -54,11 +54,11 @@ endif()
 
 check_required_components("JUCE")
 
-set(JUCE_MODULES_DIR "/Users/gmc/Documents/GitHub/Heart-Sync/HeartSync/build/_deps/juce-src/modules" CACHE INTERNAL
+set(JUCE_MODULES_DIR "/Users/gmc/Documents/GitHub/Heart-Sync/archive/HeartSync_legacy/build/_deps/juce-src/modules" CACHE INTERNAL
     "The path to JUCE modules")
 
-include("/Users/gmc/Documents/GitHub/Heart-Sync/HeartSync/build/_deps/juce-src/extras/Build/CMake/JUCEModuleSupport.cmake")
-include("/Users/gmc/Documents/GitHub/Heart-Sync/HeartSync/build/_deps/juce-src/extras/Build/CMake/JUCEUtils.cmake")
+include("/Users/gmc/Documents/GitHub/Heart-Sync/archive/HeartSync_legacy/build/_deps/juce-src/extras/Build/CMake/JUCEModuleSupport.cmake")
+include("/Users/gmc/Documents/GitHub/Heart-Sync/archive/HeartSync_legacy/build/_deps/juce-src/extras/Build/CMake/JUCEUtils.cmake")
 
 set(_juce_modules
     juce_analytics
@@ -110,7 +110,7 @@ unset(_targets_defined)
 unset(_targets_expected)
 
 foreach(_juce_module IN LISTS _juce_modules)
-    juce_add_module("/Users/gmc/Documents/GitHub/Heart-Sync/HeartSync/build/_deps/juce-src/modules/${_juce_module}" ALIAS_NAMESPACE juce)
+    juce_add_module("/Users/gmc/Documents/GitHub/Heart-Sync/archive/HeartSync_legacy/build/_deps/juce-src/modules/${_juce_module}" ALIAS_NAMESPACE juce)
 endforeach()
 
 unset(_juce_modules)

@@ -66,7 +66,16 @@ public:
 
     void mouseUp(const juce::MouseEvent& e) override
     {
-        if (e.mods.isLeftButtonDown()) return; // only on release
+        // Keep for legacy but don't rely on release state — toggle on click
+        isOn = !isOn;
+        repaint();
+        if (onChange) onChange(isOn);
+    }
+
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        juce::ignoreUnused(e);
+        // Toggle immediately on press for snappy UI
         isOn = !isOn;
         repaint();
         if (onChange) onChange(isOn);

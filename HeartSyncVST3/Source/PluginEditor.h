@@ -3,6 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "PluginProcessor_Professional.h"
+#include <vector>
 
 // HeartSync Professional Color Scheme (matching Python version exactly)
 namespace HeartSyncColors
@@ -32,7 +33,8 @@ namespace HeartSyncColors
 // Use the Professional processor type
 using HeartSyncProcessor = HeartSyncVST3AudioProcessor;
 
-class HeartSyncEditor : public juce::AudioProcessorEditor, private juce::Timer
+class HeartSyncEditor : public juce::AudioProcessorEditor, 
+                        private juce::Timer
 {
 public:
     explicit HeartSyncEditor(HeartSyncProcessor&);
@@ -43,15 +45,28 @@ public:
 
 private:
     void timerCallback() override;
+    void mouseDown(const juce::MouseEvent& event) override;
+    
     void wireClientCallbacks();
     void scanForDevices();
     void connectToDevice(const juce::String& deviceAddress);
+    void connectSelectedDevice();
     
     // Build control functions for each row
     void buildHROffsetControls(juce::Component& host);
     void buildSmoothControls(juce::Component& host);
     void buildWetDryControls(juce::Component& host);
     void updateSmoothMetrics();
+    void refreshDeviceDropdown();
+    void updateBiometricDisplay();
+    void appendTerminal(const juce::String& message);
+    void updateTerminalLabel();
+    void updateBluetoothStatus();
+    void syncBleControls();
+    void setStatusIndicator(juce::Colour colour, const juce::String& text);
+    juce::String buildDeviceLabel(const HeartSyncProcessor::DeviceInfo& device) const;
+    juce::String buildDeviceDetail(const HeartSyncProcessor::DeviceInfo& device) const;
+    juce::String shortenIdentifier(const std::string& identifier) const;
 
     HeartSyncProcessor& processorRef;
     HSLookAndFeel lnf;
@@ -72,14 +87,18 @@ private:
     juce::TextButton scanBtn{"SCAN"}, connectBtn{"CONNECT"},
                      lockBtn{"LOCK"}, disconnectBtn{"DISCONNECT"};
     juce::ComboBox deviceBox;
+    juce::Label deviceLabel;
     juce::Label statusDot, statusLabel;
     juce::Label bleTitle;
 
     // Device terminal row
     juce::Label terminalTitle;
-    juce::Label terminalLabel;
+    juce::TextEditor terminalOutput;
+    juce::StringArray terminalLines;
 
     // Header labels (Python parity)
+    juce::Label headerSettingsIcon;   // gear glyph
+    juce::Label headerGlyph;          // diamond glyph
     juce::Label headerTitleLeft;      // ❖ HEART SYNC SYSTEM
     juce::Label headerSubtitleLeft;   // Adaptive Audio Bio Technology
     juce::Label headerClockRight;     // YYYY-MM-DD HH:MM:SS
@@ -93,6 +112,22 @@ private:
     int wetDryOffset = 0;
     bool useSmoothedForWetDry = true;
     bool deviceLocked = false;
+    bool statusWasConnected = false;
+    bool statusWasScanning = false;
+    bool statusWasReady = false;
+    bool pendingScanRequest = false;
+    juce::String statusLastDeviceName;
+    std::vector<HeartSyncProcessor::DeviceInfo> availableDevices;
+    size_t knownDeviceCount = 0;
+    bool bridgeWasConnected = false;
+    bool bridgeWasReady = false;
+    bool bridgeHintShown = false;
+    juce::String lastBridgePermission;
+    
+    // UX improvement: auto-connect on device selection
+    juce::String pendingDeviceSelection;
+    juce::uint32 lastDeviceSelectionTime = 0;
+    bool isAutoConnecting = false;
 
 #ifdef HEARTSYNC_USE_BRIDGE
     juce::String currentPermissionState{"unknown"};

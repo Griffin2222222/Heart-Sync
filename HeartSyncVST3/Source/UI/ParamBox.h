@@ -16,22 +16,28 @@ class ParamBox : public juce::Component
 {
 public:
     ParamBox(const juce::String& title, juce::Colour colour, 
-             const juce::String& suffix, float minVal, float maxVal, float step)
+             const juce::String& suffix, float minVal, float maxVal, float step, float defaultVal = 0.0f)
         : titleText(title), rowColour(colour), valueSuffix(suffix),
-          minValue(minVal), maxValue(maxVal), stepSize(step), currentValue(minVal)
+          minValue(minVal), maxValue(maxVal), stepSize(step), defaultValue(defaultVal), currentValue(defaultVal)
     {
         setSize(120, 72); // Title + box
     }
     
-    void setValue(float v)
+    void setValue(float v, bool notifyListeners = true)
     {
         currentValue = juce::jlimit(minValue, maxValue, v);
         repaint();
-        if (onChange)
+        if (onChange && notifyListeners)
             onChange(currentValue);
     }
     
+    void resetToDefault()
+    {
+        setValue(defaultValue, true);
+    }
+    
     float getValue() const { return currentValue; }
+    float getDefaultValue() const { return defaultValue; }
     
     void paint(juce::Graphics& g) override
     {
@@ -77,14 +83,29 @@ public:
     {
         if (e.mods.isLeftButtonDown())
         {
-            if (e.getNumberOfClicks() == 2)
+            // Double-click on value box OR Cmd+click on value box → reset to default
+            if (e.getNumberOfClicks() == 2 || e.mods.isCommandDown())
             {
-                // Double-click: open text editor for exact value input
-                startEdit();
+                resetToDefault();
+                return;
+            }
+            
+            // Check if clicking on title area
+            auto bounds = getLocalBounds();
+            auto titleArea = bounds.removeFromTop(18);
+            
+            if (titleArea.contains(e.getPosition()))
+            {
+                // Cmd+click on title → reset to default
+                if (e.mods.isCommandDown())
+                {
+                    resetToDefault();
+                    return;
+                }
             }
             else
             {
-                // Single click: prepare for drag
+                // Single click on value box: prepare for drag
                 dragStartY = e.y;
                 dragStartValue = currentValue;
             }
@@ -153,6 +174,7 @@ private:
     juce::Colour rowColour;
     juce::String valueSuffix;
     float minValue, maxValue, stepSize;
+    float defaultValue;
     float currentValue;
     
     int dragStartY = -1;

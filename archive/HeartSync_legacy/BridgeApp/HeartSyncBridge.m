@@ -378,8 +378,10 @@ static BOOL HSIsSocketActive(NSString *socketPath) {
     if (_centralManager.state == CBManagerStatePoweredOn && !_isScanning) {
         _isScanning = YES;
         [_discoveredPeripherals removeAllObjects];
-        [_centralManager scanForPeripheralsWithServices:@[HR_SERVICE_UUID] options:nil];
-        NSLog(@"[Bridge] Started BLE scan");
+        // Scan for ALL devices (nil services) so we see devices even before they expose the HR service
+        [_centralManager scanForPeripheralsWithServices:nil
+                                                options:@{ CBCentralManagerScanOptionAllowDuplicatesKey : @NO }];
+        NSLog(@"[Bridge] Started BLE scan (all devices)");
     }
 }
 
@@ -426,17 +428,32 @@ static BOOL HSIsSocketActive(NSString *socketPath) {
  didDiscoverPeripheral:(CBPeripheral *)peripheral
      advertisementData:(NSDictionary<NSString *,id> *)advertisementData
                   RSSI:(NSNumber *)RSSI {
-    NSString *deviceId = peripheral.identifier.UUIDString;
-    _discoveredPeripherals[deviceId] = peripheral;
-    
+    NSString *deviceId = peripheral.identifier.UUIDString ?: @"";
     NSString *name = advertisementData[CBAdvertisementDataLocalNameKey] ?: peripheral.name ?: @"Unknown";
-    
+
+    if (deviceId.length == 0)
+        return; // nothing we can do without an identifier
+
+    _discoveredPeripherals[deviceId] = peripheral;
+
+    NSLog(@"[Bridge] Discovered device: %@ (%@) RSSI:%@", name, deviceId, RSSI);
+
     if (self.deviceFound) {
-        self.deviceFound(@{
+        NSMutableDictionary *payload = [@{
             @"id": deviceId,
             @"rssi": RSSI,
             @"name": name
-        });
+        } mutableCopy];
+
+        NSArray *serviceUUIDs = advertisementData[CBAdvertisementDataServiceUUIDsKey];
+        if (serviceUUIDs.count > 0) {
+            NSMutableArray *services = [NSMutableArray arrayWithCapacity:serviceUUIDs.count];
+            for (CBUUID *uuid in serviceUUIDs)
+                [services addObject:uuid.UUIDString ?: @"Unknown"];
+            payload[@"services"] = services;
+        }
+
+        self.deviceFound(payload);
     }
 }
 
@@ -559,17 +576,16 @@ didUpdateValueForCharacteristic:(CBCharacteristic *)characteristic
     };
     
     _bleManager.deviceFound = ^(NSDictionary *device) {
-        [weakSelf.server sendMessage:@{
-            @"type": @"device_found",
-            @"device": device
-        }];
+        NSMutableDictionary *msg = [@{@"type": @"device_found"} mutableCopy];
+        [msg addEntriesFromDictionary:device];
+        [weakSelf.server sendMessage:msg];
     };
     
     _bleManager.connectionChanged = ^(BOOL connected, NSString *deviceId) {
-        [weakSelf.server sendMessage:@{
-            @"type": connected ? @"connected" : @"disconnected",
-            @"device_id": deviceId
-        }];
+        NSMutableDictionary *msg = [@{ @"type": connected ? @"connected" : @"disconnected" } mutableCopy];
+        if (deviceId)
+            msg[@"id"] = deviceId;
+        [weakSelf.server sendMessage:msg];
     };
     
     _bleManager.heartRateDataReceived = ^(NSInteger bpm, NSTimeInterval ts, NSArray *rr) {

@@ -3,11 +3,11 @@
 
 cmake_minimum_required(VERSION ${CMAKE_VERSION}) # this file comes with cmake
 
-if(EXISTS "/Users/gmc/Documents/GitHub/Heart-Sync/HeartSync/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/juce-populate-gitclone-lastrun.txt" AND EXISTS "/Users/gmc/Documents/GitHub/Heart-Sync/HeartSync/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/juce-populate-gitinfo.txt" AND
-  "/Users/gmc/Documents/GitHub/Heart-Sync/HeartSync/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/juce-populate-gitclone-lastrun.txt" IS_NEWER_THAN "/Users/gmc/Documents/GitHub/Heart-Sync/HeartSync/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/juce-populate-gitinfo.txt")
+if(EXISTS "/Users/gmc/Documents/GitHub/Heart-Sync/archive/HeartSync_legacy/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/juce-populate-gitclone-lastrun.txt" AND EXISTS "/Users/gmc/Documents/GitHub/Heart-Sync/archive/HeartSync_legacy/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/juce-populate-gitinfo.txt" AND
+  "/Users/gmc/Documents/GitHub/Heart-Sync/archive/HeartSync_legacy/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/juce-populate-gitclone-lastrun.txt" IS_NEWER_THAN "/Users/gmc/Documents/GitHub/Heart-Sync/archive/HeartSync_legacy/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/juce-populate-gitinfo.txt")
   message(VERBOSE
     "Avoiding repeated git clone, stamp file is up to date: "
-    "'/Users/gmc/Documents/GitHub/Heart-Sync/HeartSync/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/juce-populate-gitclone-lastrun.txt'"
+    "'/Users/gmc/Documents/GitHub/Heart-Sync/archive/HeartSync_legacy/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/juce-populate-gitclone-lastrun.txt'"
   )
   return()
 endif()
@@ -22,12 +22,12 @@ else()
 endif()
 
 execute_process(
-  COMMAND ${CMAKE_COMMAND} -E rm -rf "/Users/gmc/Documents/GitHub/Heart-Sync/HeartSync/build/_deps/juce-src"
+  COMMAND ${CMAKE_COMMAND} -E rm -rf "/Users/gmc/Documents/GitHub/Heart-Sync/archive/HeartSync_legacy/build/_deps/juce-src"
   RESULT_VARIABLE error_code
   ${maybe_show_command}
 )
 if(error_code)
-  message(FATAL_ERROR "Failed to remove directory: '/Users/gmc/Documents/GitHub/Heart-Sync/HeartSync/build/_deps/juce-src'")
+  message(FATAL_ERROR "Failed to remove directory: '/Users/gmc/Documents/GitHub/Heart-Sync/archive/HeartSync_legacy/build/_deps/juce-src'")
 endif()
 
 # try the clone 3 times in case there is an odd git clone issue
@@ -37,7 +37,7 @@ while(error_code AND number_of_tries LESS 3)
   execute_process(
     COMMAND "/opt/homebrew/bin/git"
             clone --no-checkout --config "advice.detachedHead=false" "https://github.com/juce-framework/JUCE.git" "juce-src"
-    WORKING_DIRECTORY "/Users/gmc/Documents/GitHub/Heart-Sync/HeartSync/build/_deps"
+    WORKING_DIRECTORY "/Users/gmc/Documents/GitHub/Heart-Sync/archive/HeartSync_legacy/build/_deps"
     RESULT_VARIABLE error_code
     ${maybe_show_command}
   )
@@ -53,7 +53,7 @@ endif()
 execute_process(
   COMMAND "/opt/homebrew/bin/git"
           checkout "7.0.9" --
-  WORKING_DIRECTORY "/Users/gmc/Documents/GitHub/Heart-Sync/HeartSync/build/_deps/juce-src"
+  WORKING_DIRECTORY "/Users/gmc/Documents/GitHub/Heart-Sync/archive/HeartSync_legacy/build/_deps/juce-src"
   RESULT_VARIABLE error_code
   ${maybe_show_command}
 )
@@ -66,22 +66,22 @@ if(init_submodules)
   execute_process(
     COMMAND "/opt/homebrew/bin/git" 
             submodule update --recursive --init 
-    WORKING_DIRECTORY "/Users/gmc/Documents/GitHub/Heart-Sync/HeartSync/build/_deps/juce-src"
+    WORKING_DIRECTORY "/Users/gmc/Documents/GitHub/Heart-Sync/archive/HeartSync_legacy/build/_deps/juce-src"
     RESULT_VARIABLE error_code
     ${maybe_show_command}
   )
 endif()
 if(error_code)
-  message(FATAL_ERROR "Failed to update submodules in: '/Users/gmc/Documents/GitHub/Heart-Sync/HeartSync/build/_deps/juce-src'")
+  message(FATAL_ERROR "Failed to update submodules in: '/Users/gmc/Documents/GitHub/Heart-Sync/archive/HeartSync_legacy/build/_deps/juce-src'")
 endif()
 
 # Complete success, update the script-last-run stamp file:
 #
 execute_process(
-  COMMAND ${CMAKE_COMMAND} -E copy "/Users/gmc/Documents/GitHub/Heart-Sync/HeartSync/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/juce-populate-gitinfo.txt" "/Users/gmc/Documents/GitHub/Heart-Sync/HeartSync/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/juce-populate-gitclone-lastrun.txt"
+  COMMAND ${CMAKE_COMMAND} -E copy "/Users/gmc/Documents/GitHub/Heart-Sync/archive/HeartSync_legacy/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/juce-populate-gitinfo.txt" "/Users/gmc/Documents/GitHub/Heart-Sync/archive/HeartSync_legacy/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/juce-populate-gitclone-lastrun.txt"
   RESULT_VARIABLE error_code
   ${maybe_show_command}
 )
 if(error_code)
-  message(FATAL_ERROR "Failed to copy script-last-run stamp file: '/Users/gmc/Documents/GitHub/Heart-Sync/HeartSync/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/juce-populate-gitclone-lastrun.txt'")
+  message(FATAL_ERROR "Failed to copy script-last-run stamp file: '/Users/gmc/Documents/GitHub/Heart-Sync/archive/HeartSync_legacy/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/juce-populate-gitclone-lastrun.txt'")
 endif()

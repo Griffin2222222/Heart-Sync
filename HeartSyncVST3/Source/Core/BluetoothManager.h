@@ -10,7 +10,7 @@
 #ifdef __OBJC__
 @class CBCentralManager;
 @class CBPeripheral;
-@class NSMutableArray;
+@class NSMutableDictionary;
 @class HeartRateDelegate;
 #else
 class CBCentralManager;
@@ -47,6 +47,7 @@ public:
     bool isConnected() const { return connected.load(); }
     std::string getConnectedDeviceName() const { return connectedDeviceName; }
     std::vector<BluetoothDevice> getDiscoveredDevices() const;
+    bool isReady() const { return bluetoothReady.load(); }
     
     // Heart rate data with history for UI
     float getCurrentHeartRate() const { return currentHeartRate.load(); }
@@ -73,7 +74,6 @@ private:
     // Core Bluetooth objects (macOS)
     CBCentralManager* centralManager;
     CBPeripheral* connectedPeripheral;
-    NSMutableArray* discoveredPeripherals;
     HeartRateDelegate* delegate;
     
     // State variables
@@ -90,6 +90,7 @@ private:
     std::atomic<float> heartRateOffset;
     std::atomic<float> smoothingFactor;
     std::atomic<float> wetDryOffset;
+    std::atomic<bool> bluetoothReady;
     
     // Heart rate history for smoothing, wet/dry calculation, and UI display
     mutable std::mutex historyMutex;
@@ -126,5 +127,8 @@ public:
 @interface HeartRateDelegate : NSObject <CBCentralManagerDelegate, CBPeripheralDelegate>
 @property (nonatomic, assign) BluetoothManager* manager;
 - (instancetype)initWithManager:(BluetoothManager*)mgr;
+- (void)resetPeripheralCache;
+- (void)cachePeripheral:(CBPeripheral*)peripheral;
+- (CBPeripheral*)peripheralForIdentifier:(NSString*)identifier;
 @end
 #endif

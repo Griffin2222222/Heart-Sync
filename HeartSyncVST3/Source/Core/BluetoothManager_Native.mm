@@ -13,13 +13,46 @@ static NSString* const HEART_RATE_MEASUREMENT_UUID = @"2A37";
 
 @implementation HeartRateDelegate {
     BluetoothManager* cppManager;
+    NSMutableDictionary<NSString*, CBPeripheral*>* cachedPeripherals;
 }
 
 - (instancetype)initWithManager:(BluetoothManager*)mgr {
     if (self = [super init]) {
         cppManager = mgr;
+        cachedPeripherals = [[NSMutableDictionary alloc] init];
     }
     return self;
+}
+
+- (void)resetPeripheralCache
+{
+    @synchronized (self) {
+        [cachedPeripherals removeAllObjects];
+    }
+}
+
+- (void)cachePeripheral:(CBPeripheral*)peripheral
+{
+    if (peripheral == nil)
+        return;
+
+    NSString* identifier = peripheral.identifier.UUIDString;
+    if (identifier.length == 0)
+        return;
+
+    @synchronized (self) {
+        cachedPeripherals[identifier] = peripheral;
+    }
+}
+
+- (CBPeripheral*)peripheralForIdentifier:(NSString*)identifier
+{
+    if (identifier.length == 0)
+        return nil;
+
+    @synchronized (self) {
+        return cachedPeripherals[identifier];
+    }
 }
 
 #pragma mark - CBCentralManagerDelegate
@@ -86,6 +119,7 @@ static NSString* const HEART_RATE_MEASUREMENT_UUID = @"2A37";
     if (isHeartRateDevice && cppManager) {
         std::string name([deviceName UTF8String]);
         std::string id([identifier UTF8String]);
+        [self cachePeripheral:peripheral];
         cppManager->didDiscoverPeripheral(name, id, rssiValue);
     }
 }
@@ -199,7 +233,6 @@ static NSString* const HEART_RATE_MEASUREMENT_UUID = @"2A37";
 BluetoothManager::BluetoothManager()
     : centralManager(nullptr)
     , connectedPeripheral(nullptr)
-    , discoveredPeripherals(nullptr)
     , delegate(nullptr)
     , scanning(false)
     , connected(false)
@@ -209,6 +242,7 @@ BluetoothManager::BluetoothManager()
     , heartRateOffset(0.0f)
     , smoothingFactor(0.1f)
     , wetDryOffset(0.0f)
+    , bluetoothReady(false)
 {
     initializeBluetooth();
 }
@@ -220,17 +254,21 @@ BluetoothManager::~BluetoothManager()
 
 void BluetoothManager::initializeBluetooth()
 {
-    // Temporarily disable Bluetooth initialization to prevent crashes
-    // TODO: Implement proper deferred initialization
-    logToConsole("❖ HeartSync Bluetooth LE Manager - Deferred initialization");
-    return;
-    
 #ifdef __APPLE__
     @autoreleasepool {
+        NSBundle* hostBundle = [NSBundle mainBundle];
+        NSString* usageDescription = [hostBundle objectForInfoDictionaryKey:@"NSBluetoothAlwaysUsageDescription"];
+
+        if (usageDescription == nil || usageDescription.length == 0) {
+            logToConsole("✗ Host missing NSBluetoothAlwaysUsageDescription entitlement; Bluetooth disabled");
+            bluetoothReady = false;
+            return;
+        }
+
         delegate = [[HeartRateDelegate alloc] initWithManager:this];
         centralManager = [[CBCentralManager alloc] initWithDelegate:delegate queue:nil];
-        discoveredPeripherals = [[NSMutableArray alloc] init];
         logToConsole("❖ HeartSync Bluetooth LE Manager Initialized");
+        bluetoothReady = (centralManager && centralManager.state == CBManagerStatePoweredOn);
     }
 #else
     logToConsole("❖ Bluetooth LE not supported on this platform");
@@ -245,10 +283,6 @@ void BluetoothManager::cleanupBluetooth()
             [centralManager stopScan];
             centralManager = nil;
         }
-        if (discoveredPeripherals) {
-            [discoveredPeripherals removeAllObjects];
-            discoveredPeripherals = nil;
-        }
         delegate = nil;
         connectedPeripheral = nil;
     }
@@ -261,9 +295,10 @@ void BluetoothManager::startScanning()
     
 #ifdef __APPLE__
     @autoreleasepool {
-        if (centralManager && centralManager.state == CBManagerStatePoweredOn) {
+        if (centralManager && bluetoothReady.load() && centralManager.state == CBManagerStatePoweredOn) {
             scanning = true;
-            [discoveredPeripherals removeAllObjects];
+            if (delegate)
+                [delegate resetPeripheralCache];
             
             std::lock_guard<std::mutex> lock(devicesMutex);
             discoveredDevices.clear();
@@ -276,6 +311,7 @@ void BluetoothManager::startScanning()
             logToConsole("❖ Scanning for Heart Rate monitors...");
             if (onDeviceDiscovered) onDeviceDiscovered();
         } else {
+            bluetoothReady = (centralManager && centralManager.state == CBManagerStatePoweredOn);
             logToConsole("✗ Bluetooth not ready for scanning");
         }
     }
@@ -306,19 +342,30 @@ void BluetoothManager::connectToDevice(const std::string& deviceIdentifier)
             return;
         }
         
+        if (scanning.load())
+            stopScanning();
+
         NSString* targetID = [NSString stringWithUTF8String:deviceIdentifier.c_str()];
-        NSUUID* uuid = [[NSUUID alloc] initWithUUIDString:targetID];
-        
-        if (uuid) {
-            NSArray* peripherals = [centralManager retrievePeripheralsWithIdentifiers:@[uuid]];
-            if (peripherals.count > 0) {
-                CBPeripheral* peripheral = peripherals[0];
-                connectedPeripheral = peripheral;
-                [centralManager connectPeripheral:peripheral options:nil];
-                logToConsole("❖ Connecting to " + std::string([peripheral.name UTF8String] ?: "Unknown Device"));
-            } else {
-                logToConsole("✗ Device not found for connection");
+        CBPeripheral* peripheral = nil;
+
+        if (delegate)
+            peripheral = [delegate peripheralForIdentifier:targetID];
+
+        if (peripheral == nil && targetID.length > 0) {
+            NSUUID* uuid = [[NSUUID alloc] initWithUUIDString:targetID];
+            if (uuid) {
+                NSArray* peripherals = [centralManager retrievePeripheralsWithIdentifiers:@[uuid]];
+                if (peripherals.count > 0)
+                    peripheral = peripherals[0];
             }
+        }
+
+        if (peripheral) {
+            connectedPeripheral = peripheral;
+            [centralManager connectPeripheral:peripheral options:nil];
+            logToConsole("❖ Connecting to " + std::string([peripheral.name UTF8String] ?: "Unknown Device"));
+        } else {
+            logToConsole("✗ Device not found for connection");
         }
     }
 #endif
@@ -507,6 +554,8 @@ void BluetoothManager::didReceiveHeartRateData(float heartRate)
 
 void BluetoothManager::bluetoothStateDidUpdate(bool isAvailable)
 {
+    bluetoothReady = isAvailable;
+
     if (!isAvailable) {
         scanning = false;
         connected = false;
@@ -515,5 +564,8 @@ void BluetoothManager::bluetoothStateDidUpdate(bool isAvailable)
         if (onConnectionStatusChanged) {
             onConnectionStatusChanged();
         }
+    } else {
+        if (onConnectionStatusChanged)
+            onConnectionStatusChanged();
     }
 }

@@ -20,7 +20,7 @@ sw_vers              # Need macOS 12.0+
 ```bash
 cd /Users/gmc/Documents/GitHub/Heart-Sync/HeartSync
 
-# 1. Clean previous build
+# 1. Clean previous builda
 rm -rf build
 git checkout ble-helper-refactor  # Or create new branch for UDS work
 

@@ -1,6 +1,9 @@
 #pragma once
 #include "RectPanel.h"
+#include <algorithm>
 #include <deque>
+#include <optional>
+#include <vector>
 
 class WaveGraph : public RectPanel, private juce::Timer
 {
@@ -11,18 +14,42 @@ public:
     {
         if (buffer.size() >= maxPts) buffer.pop_front();
         buffer.push_back (v);
-        
-        // Track stats
-        if (buffer.size() > 0)
-        {
-            auto [mn, mx] = std::minmax_element(buffer.begin(), buffer.end());
-            peakValue = *mx;
-            minValue = *mn;
-            lastValue = buffer.back();
-        }
+        recomputeStats();
     }
     
     void setLineColour(juce::Colour c) { lineColour = c; }
+    void setYAxisLabel(const juce::String& label) { axisLabel = label; repaint(); }
+
+    void setFixedRange(float minValue, float maxValue)
+    {
+        fixedRange = juce::Range<float>(minValue, maxValue);
+        repaint();
+    }
+
+    void clearFixedRange()
+    {
+        fixedRange.reset();
+        repaint();
+    }
+
+    void setSamples(const std::vector<float>& values)
+    {
+        if (values.empty())
+        {
+            buffer.clear();
+            recomputeStats();
+            repaint();
+            return;
+        }
+
+        if (values.size() > maxPts)
+            buffer.assign(values.end() - maxPts, values.end());
+        else
+            buffer.assign(values.begin(), values.end());
+
+        recomputeStats();
+        repaint();
+    }
 
 private:
     void timerCallback() override { repaint(); }
@@ -37,15 +64,17 @@ private:
         auto plot = r.reduced(HSTheme::grid * 1.0f);
         plot.removeFromLeft(leftMargin);
         
-        // Draw "BPM" rotated on Y-axis
-        g.saveState();
-        g.addTransform(juce::AffineTransform::rotation(-juce::MathConstants<float>::halfPi, 
-                                                        r.getX() + 20, r.getCentreY()));
-        g.setColour(HSTheme::TEXT_SECONDARY);
-        g.setFont(HSTheme::label());
-        g.drawText("BPM", juce::Rectangle<float>(r.getX(), r.getCentreY() - 40, 80, 20), 
-                   juce::Justification::centred);
-        g.restoreState();
+        if (axisLabel.isNotEmpty())
+        {
+            g.saveState();
+            g.addTransform(juce::AffineTransform::rotation(-juce::MathConstants<float>::halfPi,
+                                                            r.getX() + 20, r.getCentreY()));
+            g.setColour(HSTheme::TEXT_SECONDARY);
+            g.setFont(HSTheme::label());
+            g.drawText(axisLabel, juce::Rectangle<float>(r.getX(), r.getCentreY() - 40, 80, 20),
+                       juce::Justification::centred);
+            g.restoreState();
+        }
         
         // Inner frame (ECG monitor style)
         g.setColour (juce::Colour (0xff003f3f)); // Major grid color
@@ -79,13 +108,28 @@ private:
         if (buffer.size() < 2) return;
 
         // Scale with 12% headroom
-        float lo = minValue, hi = peakValue;
-        float range = hi - lo;
-        if (range < 1.0f) { range = 10.0f; lo = lastValue - 5.0f; hi = lastValue + 5.0f; }
-        
-        float headroom = range * 0.12f;
-        lo -= headroom;
-        hi += headroom;
+        float lo = minValue;
+        float hi = peakValue;
+
+        if (fixedRange.has_value())
+        {
+            lo = fixedRange->getStart();
+            hi = fixedRange->getEnd();
+        }
+        else
+        {
+            float range = hi - lo;
+            if (range < 1.0f)
+            {
+                range = 10.0f;
+                lo = lastValue - 5.0f;
+                hi = lastValue + 5.0f;
+            }
+
+            const float headroom = range * 0.12f;
+            lo -= headroom;
+            hi += headroom;
+        }
         
         // Draw waveform path (2px line width)
         juce::Path p; 
@@ -108,4 +152,20 @@ private:
     float lastValue = 0.0f;
     float peakValue = 0.0f;
     float minValue = 0.0f;
+    juce::String axisLabel{"BPM"};
+    std::optional<juce::Range<float>> fixedRange;
+
+    void recomputeStats()
+    {
+        if (buffer.empty())
+        {
+            lastValue = peakValue = minValue = 0.0f;
+            return;
+        }
+
+        auto [mn, mx] = std::minmax_element(buffer.begin(), buffer.end());
+        minValue = *mn;
+        peakValue = *mx;
+        lastValue = buffer.back();
+    }
 };
